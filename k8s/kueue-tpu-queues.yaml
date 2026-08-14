@@ -1,0 +1,77 @@
+# Kueue topology. This lets 300 students share 32 chips instead of needing 300.
+#
+# A queue is required, not optional. GKE schedules one pod per TPU node, and that pod
+# uses every chip on the node. Two pods cannot share a v5e chip. Without admission
+# control, 300 students who run code at the same time create 300 pending pods.
+# Autopilot then tries to build 300 nodes and the zone runs out. Kueue holds the jobs
+# and admits only the number that the pool can serve.
+#
+# Two flavors, in order of preference:
+#   v5e-ondemand  predictable, $1.20 for each chip-hour
+#   v5e-flex      DWS flex-start, $0.60 for each chip-hour, no guaranteed start time
+#
+# Kueue moves work to flex when the on-demand quota is full. The lower-cost capacity is
+# therefore used, and no student waits for it.
+#
+# Four section ClusterQueues share one cohort. Each section has a guaranteed share.
+# Each section can borrow the unused chips of the other sections. If section A is the
+# only section with work, section A gets the full pool. When section B submits, section
+# A returns chips to it.
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v5e-ondemand
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+    cloud.google.com/gke-tpu-topology: 1x1
+  tolerations:
+    - key: google.com/tpu
+      operator: Exists
+      effect: NoSchedule
+---
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ResourceFlavor
+metadata:
+  name: v5e-flex
+spec:
+  nodeLabels:
+    cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+    cloud.google.com/gke-tpu-topology: 1x1
+    cloud.google.com/gke-flex-start: "true"
+  tolerations:
+    - key: google.com/tpu
+      operator: Exists
+      effect: NoSchedule
+---
+# Section A. The other three are identical apart from the name; 02_create_cluster.sh
+# generates them from this block so the quota split stays in one place.
+apiVersion: kueue.x-k8s.io/v1beta2
+kind: ClusterQueue
+metadata:
+  name: section-a
+spec:
+  # v1beta2 renamed this from `cohort`. The old name is rejected outright with
+  # 'unknown field "spec.cohort"' rather than being silently ignored.
+  cohortName: classroom
+  namespaceSelector: {}
+  # BestEffortFIFO, not StrictFIFO. One student asking for more chips than the pool
+  # holds would head-block every other student under StrictFIFO. BestEffortFIFO lets
+  # smaller jobs past it.
+  queueingStrategy: BestEffortFIFO
+  resourceGroups:
+    - coveredResources: ["google.com/tpu"]
+      flavors:
+        # Quota is per (flavor, resource) and the flavors SUM into the queue's
+        # capacity. Two flavors at 4 each is an 8-chip section, not a 4-chip section
+        # with an overflow lane. 02_create_cluster.sh computes these as
+        # POOL_CHIPS / sections / flavors for that reason.
+        - name: v5e-ondemand
+          resources:
+            - name: "google.com/tpu"
+              nominalQuota: 4
+        - name: v5e-flex
+          resources:
+            - name: "google.com/tpu"
+              nominalQuota: 4

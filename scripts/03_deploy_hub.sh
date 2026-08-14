@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Install JupyterHub and give student notebooks permission to submit TPU Jobs.
+#
+# The RBAC below is the security boundary. A student notebook can create, watch and
+# delete Jobs in its own namespace. It can also read the logs of those Jobs.
+#
+# The notebook cannot use a different namespace. It cannot edit the ClusterQueue that
+# limits the pool. Student code is not trusted. Configure it in this way.
+set -euo pipefail
+
+PROJECT="${PROJECT:?set PROJECT to your GCP project id}"
+REGION="${REGION:-us-west4}"
+CLUSTER="${CLUSTER:-tpu-notebooks}"
+NAMESPACE="${NAMESPACE:-class-sec-a}"
+RELEASE="${RELEASE:-hub}"
+CHART_VERSION="${CHART_VERSION:-4.2.0}"
+
+gcloud container clusters get-credentials "${CLUSTER}" \
+  --region="${REGION}" --project="${PROJECT}" >/dev/null 2>&1
+
+echo "==> student service account + RBAC in ${NAMESPACE}"
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: student
+  namespace: ${NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: student-tpu-submit
+  namespace: ${NAMESPACE}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Read-only on their own queued work, so a student can see their place in line.
+  - apiGroups: ["kueue.x-k8s.io"]
+    resources: ["workloads", "localqueues"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: student-tpu-submit
+  namespace: ${NAMESPACE}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: student-tpu-submit
+subjects:
+  - kind: ServiceAccount
+    name: student
+    namespace: ${NAMESPACE}
+EOF
+
+echo "==> helm repo"
+helm repo add jupyterhub https://hub.jupyter.org/helm-chart/ >/dev/null 2>&1 || true
+helm repo update >/dev/null
+
+# The singleuser NetworkPolicy has to name the API server's real endpoint, because
+# Dataplane V2 applies policy after the Service DNAT and the ClusterIP never matches.
+# Resolve it here rather than hardcoding it in the values file.
+APISERVER=$(kubectl get endpoints kubernetes -n default \
+              -o jsonpath='{.subsets[0].addresses[0].ip}')
+if [[ -z "${APISERVER}" ]]; then
+  echo "could not resolve the API server endpoint; student notebooks will not be able" >&2
+  echo "to submit TPU jobs. Check: kubectl get endpoints kubernetes -n default" >&2
+  exit 1
+fi
+echo "==> API server endpoint ${APISERVER} (not the ClusterIP -- see the values file)"
+
+VALUES=$(mktemp)
+trap 'rm -f "${VALUES}"' EXIT
+sed "s|__APISERVER_ENDPOINT__|${APISERVER}|" \
+  "$(dirname "$0")/../k8s/jupyterhub-values.yaml" > "${VALUES}"
+
+echo "==> installing JupyterHub ${CHART_VERSION} into ${NAMESPACE}"
+helm upgrade --install "${RELEASE}" jupyterhub/jupyterhub \
+  --namespace "${NAMESPACE}" \
+  --version "${CHART_VERSION}" \
+  --values "${VALUES}" \
+  --set-file "singleuser.extraFiles.submit_tpu\.py.stringData=$(dirname "$0")/../notebooks/submit_tpu.py" \
+  --set-file "singleuser.extraFiles.hw0_tpu_hello\.ipynb.stringData=$(dirname "$0")/../notebooks/hw0_tpu_hello.ipynb" \
+  --timeout 20m \
+  --wait
+
+echo
+echo "==> waiting for the proxy LoadBalancer address"
+for i in $(seq 1 60); do
+  IP=$(kubectl -n "${NAMESPACE}" get svc proxy-public \
+        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  [[ -n "${IP}" ]] && break
+  sleep 10
+done
+
+echo
+kubectl -n "${NAMESPACE}" get pods
+echo
+if [[ -n "${IP:-}" ]]; then
+  echo "hub: http://${IP}"
+  echo "auth is the dummy authenticator -- any username, no password. Swap for"
+  echo "GoogleOAuthenticator against your institution domain before real students touch it."
+else
+  echo "no external IP yet; kubectl -n ${NAMESPACE} get svc proxy-public -w"
+fi

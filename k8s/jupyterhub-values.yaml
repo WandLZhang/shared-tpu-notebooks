@@ -1,0 +1,248 @@
+# Zero to JupyterHub, configured for shared TPU access.
+#
+# Read the profile list first. It contains the reason for the design.
+#
+# GKE gives one pod per TPU node and that pod owns every chip on the node. A v5e chip
+# cannot be shared. A TPU-backed notebook therefore holds a chip at $1.35 for each hour
+# while the browser tab stays open. The chip stays allocated when the student reads the
+# assignment. For 300 students this is $405 for each hour.
+#
+# So students get a CPU notebook, and TPU work leaves the notebook as a queued Job
+# (see notebooks/submit_tpu.py). The chip is held for the seconds the job runs.
+#
+# The pinned TPU notebook still exists, because interactive TPU debugging is a real
+# need. It is restricted to staff. That restriction is the cost control.
+#
+# Pattern credit: ai-on-gke/quick-start-guides jupyter/profiles.md documents
+# extra_resource_limits + node_selector for TPU profiles. Its template hardcodes
+# ct4p-hightpu-4t / tpu-v4-podslice / 2x2x1 -- v4, which is us-central2-only and not
+# reachable from an ordinary project. The labels below are the v5e equivalent.
+
+hub:
+  config:
+    Authenticator:
+      # Swap for GoogleOAuthenticator against your institution domain in real use.
+      admin_users:
+        - professor
+      allowed_groups: []
+    JupyterHub:
+      authenticator_class: dummy
+  # Autopilot rejects privileged pods and enforces Pod Security Standards. Give the
+  # hub an explicit non-root context rather than letting the chart's default get
+  # rewritten by the Autopilot mutating webhook.
+  containerSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    allowPrivilegeEscalation: false
+
+proxy:
+  service:
+    type: LoadBalancer
+  chp:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+
+# Both of these are off for Autopilot.
+#   userScheduler packs users onto the fewest nodes so the rest can scale down. On
+#   Autopilot the platform already owns node packing, and the chart's scheduler needs
+#   RBAC that Autopilot restricts.
+#   prePuller pre-pulls the singleuser image onto every node with a DaemonSet. On
+#   Autopilot that means holding nodes up purely to cache an image, which is the
+#   opposite of scale-to-zero.
+scheduling:
+  userScheduler:
+    enabled: false
+  podPriority:
+    enabled: false
+  userPlaceholder:
+    enabled: false
+
+prePuller:
+  hook:
+    enabled: false
+  continuous:
+    enabled: false
+
+cull:
+  enabled: true
+  # A student who closes the laptop should not hold a pod all night. One hour idle,
+  # checked every five minutes. maxAge 12h catches the tab left open over a weekend.
+  timeout: 3600
+  every: 300
+  maxAge: 43200
+
+singleuser:
+  # z2jh ships a `block-cloud-metadata` initContainer that runs privileged with
+  # NET_ADMIN. It installs an iptables rule against 169.254.169.254. Autopilot rejects
+  # the container:
+  #
+  #   denied by autogke-disallow-privilege: container block-cloud-metadata is privileged
+  #   denied by autogke-default-linux-capabilities: capability 'NET_ADMIN' not allowed
+  #
+  # The spawn fails with a 400 from the GKE Warden webhook and the pod never appears,
+  # so this is the first thing that breaks z2jh on Autopilot.
+  #
+  # Turning it off is safe HERE and not in general. This cluster runs Workload Identity
+  # with workloadMetadataConfig mode GKE_METADATA, so the GKE Metadata Server already
+  # stands between the pod and the node service account. That is what the iptables rule
+  # protects. Confirm this before you copy the line to another cluster:
+  #
+  #   gcloud container clusters describe CLUSTER --format="value(workloadIdentityConfig.workloadPool)"
+  cloudMetadata:
+    blockWithIptables: false
+
+  # z2jh puts a NetworkPolicy on singleuser pods that denies egress to private IP
+  # ranges. This is a good default, but it stops this design. submit_tpu.py contacts the
+  # Kubernetes API server to create its Job, and that server has a private address.
+  #
+  # The symptom is a connection timeout to the API ClusterIP. The hub log shows nothing,
+  # because the network drops the packet and does not refuse it.
+  #
+  # Permit the API server only. Do not set privateIPs: true. That setting lets student
+  # code contact each other pod and node in the cluster. This includes the notebooks of
+  # other students.
+  #
+  # Allow the API server's REAL ENDPOINT, not its ClusterIP. This is the part that
+  # costs an hour if you get it wrong.
+  #
+  # GKE Dataplane V2 (Cilium) evaluates egress policy AFTER the Service DNAT. A rule
+  # that permits the `kubernetes` ClusterIP therefore never matches. Policy runs after
+  # the destination becomes the private endpoint of the control plane. That endpoint is
+  # inside the 10.0.0.0/8 range, which the z2jh rule excludes.
+  #
+  # The network drops the packet. The client reports a connection timeout to the
+  # ClusterIP, which is not the address that policy examined.
+  #
+  # Get the endpoint, not the Service IP:
+  #   kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}'
+  #
+  # It is stable for the life of the cluster. 02_create_cluster.sh prints it, and
+  # 03_deploy_hub.sh substitutes it, so this value is not hand-maintained.
+  networkPolicy:
+    enabled: true
+    egressAllowRules:
+      cloudMetadataServer: false
+      privateIPs: false
+    egress:
+      - to:
+          - ipBlock:
+              cidr: __APISERVER_ENDPOINT__/32
+        ports:
+          - protocol: TCP
+            port: 443
+
+  storage:
+    type: dynamic
+    capacity: 10Gi
+    dynamic:
+      storageClass: standard-rwo
+  # Service account the notebook uses to submit TPU Jobs. Bound by RBAC in
+  # 03_deploy_hub.sh to create Jobs in its own namespace and nothing else.
+  serviceAccountName: student
+  extraEnv:
+    KUEUE_LOCAL_QUEUE: "tpu"
+    # submit_tpu.py is mounted here rather than into /home/jovyan, because the home
+    # directory is a PVC and a ConfigMap mount would fight it.
+    PYTHONPATH: "/opt/course"
+  # 03_deploy_hub.sh fills stringData from notebooks/submit_tpu.py with helm
+  # --set-file, so the helper stays one real file instead of a copy pasted into YAML.
+  extraFiles:
+    submit_tpu.py:
+      mountPath: /opt/course/submit_tpu.py
+      stringData: "placeholder, replaced at deploy time"
+    hw0_tpu_hello.ipynb:
+      mountPath: /opt/course/hw0_tpu_hello.ipynb
+      stringData: "placeholder, replaced at deploy time"
+
+    # ONLY NEEDED WHEN REACHING THE HUB THROUGH kubectl port-forward.
+    #
+    # Jupyter Server compares the browser's Origin header against its own Host. A
+    # port-forward makes the two different. The browser sends the real hostname. The
+    # server uses localhost:8899.
+    #
+    # Each API call and websocket is refused. The kernel does not connect. A cell stays
+    # at [*], and the student sees no error. The only record is in the notebook pod log:
+    #
+    #   Blocking Cross Origin API request for /user/NAME/api/events/subscribe.
+    #   Origin: https://..., Host: localhost:8899
+    #   403 GET /user/NAME/api/events/subscribe
+    #
+    # Delete this file once the hub is behind a proper Ingress. With IAP the Origin
+    # and Host match and the default check does its job. Leaving it in place on a
+    # public deployment turns off a real cross-site protection.
+    jupyter_server_config.py:
+      mountPath: /usr/local/etc/jupyter/jupyter_server_config.py
+      stringData: |
+        c.ServerApp.allow_origin = "*"
+        c.ServerApp.allow_remote_access = True
+        c.ServerApp.disable_check_xsrf = True
+  # Two jobs at spawn.
+  #
+  # 1. Install the kubernetes client. The scipy-notebook image has none and
+  #    submit_tpu.py needs one. Bake this into a course image for a real term.
+  #
+  # 2. Copy the assignment into the student's home directory. extraFiles mounts are
+  #    read-only ConfigMap volumes. The notebook therefore cannot go in /home/jovyan.
+  #    The home directory is a PVC, and the two mounts conflict. Mount the file under
+  #    /opt/course and copy it at the first spawn.
+  #
+  #    `cp -n` matters: without it, every restart would overwrite the student's work
+  #    with the blank assignment.
+  lifecycleHooks:
+    postStart:
+      exec:
+        command:
+          - "sh"
+          - "-c"
+          - "pip install --quiet kubernetes >/dev/null 2>&1 || true;
+             cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
+  defaultUrl: "/lab"
+  image:
+    name: quay.io/jupyter/scipy-notebook
+    tag: "2024-11-11"
+
+  profileList:
+    - display_name: "Course default, CPU notebook"
+      description: >-
+        4 vCPU, 16 GB. Where you write and debug. Run TPU work from here with
+        submit_tpu.run(); the chip is attached only while your job runs.
+      default: true
+      kubespawner_override:
+        cpu_limit: 4
+        cpu_guarantee: 4
+        mem_limit: 16G
+        mem_guarantee: 16G
+
+    - display_name: "Large CPU notebook"
+      description: >-
+        8 vCPU, 32 GB, for dataset preprocessing and tokenizer training. Still no
+        accelerator — TPU work goes through the queue.
+      kubespawner_override:
+        cpu_limit: 8
+        cpu_guarantee: 8
+        mem_limit: 32G
+        mem_guarantee: 32G
+
+    - display_name: "Pinned TPU v5e notebook (staff only)"
+      description: >-
+        One v5e chip attached to the notebook for as long as it runs, for interactive
+        debugging. Bills the whole ct5lp-hightpu-1t node at about $1.20/hr. Staff only,
+        because a class of 300 doing this is $360/hr.
+      allowed_groups:
+        - staff
+      kubespawner_override:
+        image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+        extra_resource_limits:
+          google.com/tpu: "1"
+        node_selector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+          cloud.google.com/gke-tpu-topology: 1x1
+        tolerations:
+          - key: google.com/tpu
+            operator: Exists
+            effect: NoSchedule
+        # Shorter leash than the CPU profiles. An idle pinned chip is the single most
+        # expensive thing a person can leave running in this cluster.
+        cull_timeout: 1800

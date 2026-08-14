@@ -1,0 +1,104 @@
+# One student's TPU homework run. This is the unit the whole classroom is built from.
+#
+# GKE controls the structure below. These are not preferences.
+#
+#   * GKE puts one pod on each TPU node. That pod uses all of the chips on the node.
+#     Two students cannot share a v5e chip. A ct5lp-hightpu-1t node has one chip.
+#     A request for google.com/tpu: 1 therefore uses the full node.
+#   * On Autopilot you do not name the machine type. The two nodeSelector labels below
+#     make GKE select ct5lp-hightpu-1t. Autopilot then bills the full node, which is
+#     24 vCPU and 48 GiB, while the pod runs. Keep each job short.
+#   * The google.com/tpu toleration is necessary. TPU nodes have a NoSchedule taint.
+#
+# The kueue.x-k8s.io/queue-name label is what holds this job in a queue instead of
+# letting 300 of them stampede the chip pool at once. Drop the label and the job
+# schedules immediately -- which is the failure mode, not a shortcut.
+#
+# Placeholders substituted by scripts/04_scale_test.sh:
+#   __STUDENT__   student id, e.g. student-000
+#   __NAMESPACE__ that student's namespace
+#   __QUEUE__     LocalQueue name in that namespace
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: __STUDENT__
+  namespace: __NAMESPACE__
+  labels:
+    kueue.x-k8s.io/queue-name: __QUEUE__
+    tpu-notebooks/student: __STUDENT__
+spec:
+  # Kueue suspends the job on admission control, so let it own the lifecycle.
+  suspend: true
+  # backoffLimit 0 deletes the pod the moment it fails and takes the logs with it.
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        tpu-notebooks/student: __STUDENT__
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+        cloud.google.com/gke-tpu-topology: 1x1
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: hw
+          image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+          env:
+            - name: STUDENT
+              value: __STUDENT__
+            # Fail loudly on a CPU fallback. Without this a broken TPU binding
+            # silently runs the assignment on CPU and every number is wrong.
+            - name: JAX_PLATFORMS
+              value: "tpu"
+          command: ["python3", "-c"]
+          args:
+            - |
+              import os, time, json, socket
+              import jax, jax.numpy as jnp
+
+              student = os.environ["STUDENT"]
+              devs = jax.devices()
+              assert devs[0].platform == "tpu", f"not on TPU: {devs}"
+
+              # HW0: multi-head attention forward pass, the shape an LLM course cares
+              # about. B=8 heads=12 seq=1024 dh=64 -> a real v5e workload, not a toy.
+              B, H, S, D = 8, 12, 1024, 64
+              key = jax.random.PRNGKey(abs(hash(student)) % (2**31))
+              q, k, v = jax.random.normal(key, (3, B, H, S, D), dtype=jnp.bfloat16)
+
+              @jax.jit
+              def attn(q, k, v):
+                  logits = jnp.einsum("bhqd,bhkd->bhqk", q, k) / jnp.sqrt(D).astype(q.dtype)
+                  return jnp.einsum("bhqk,bhkd->bhqd", jax.nn.softmax(logits, axis=-1), v)
+
+              out = attn(q, k, v).block_until_ready()          # compile
+              t0 = time.perf_counter()
+              for _ in range(50):
+                  out = attn(q, k, v)
+              out.block_until_ready()
+              dt = (time.perf_counter() - t0) / 50
+
+              # 2 einsums, each 2*B*H*S*S*D flops
+              tflops = (4 * B * H * S * S * D) / dt / 1e12
+
+              print(json.dumps({
+                  "student":  student,
+                  "host":     socket.gethostname(),
+                  "node":     os.environ.get("NODE_NAME", "?"),
+                  "chips":    len(devs),
+                  "device":   str(devs[0]),
+                  "ms":       round(dt * 1e3, 3),
+                  "tflops":   round(tflops, 2),
+                  "checksum": float(jnp.sum(out.astype(jnp.float32))),
+              }), flush=True)
+              print(f"TPU chips: {len(devs)} :: {devs}", flush=True)
+          resources:
+            limits:
+              google.com/tpu: "1"
+            requests:
+              google.com/tpu: "1"
