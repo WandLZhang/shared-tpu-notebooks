@@ -1,43 +1,25 @@
 # shared-tpu-notebooks
 
-This repository gives several hundred students a Cloud TPU from a Jupyter notebook. You
-do not buy one chip for each student.
+Give several hundred students a Cloud TPU from a Jupyter notebook, without one chip for
+each student.
 
-Measured result: 300 students, 64 v5e chips, 12.4 minutes, 300 of 300 jobs completed,
+In a test run, 300 students shared 64 v5e chips. The run took 12.4 minutes and cost
 $11.93.
 
-Documentation in this repository uses ASD-STE100 Simplified Technical English.
+## How it works
 
----
+GKE puts one pod on each TPU node, and that pod uses all of the chips on the node. Two
+pods cannot share a TPU chip. A notebook with a chip attached therefore holds a full
+machine while the browser tab stays open, and 300 students need 300 chips.
 
-## The problem
+This repository keeps the notebook and the chip separate.
 
-Colab Enterprise runtime templates supply GPU accelerators only. Vertex AI Workbench has
-no TPU instance type. In Vertex AI, you attach TPUs to training jobs and to prediction
-endpoints. You cannot attach a TPU to an interactive notebook VM.
+**The notebook.** Each student gets a JupyterLab pod with a CPU only. The student writes
+code, debugs it, and reads the assignment in this pod.
 
-The obvious alternative is one TPU notebook for each student. This does not scale. The
-cause is a property of the platform. It is not a setting that you can change.
-
-> GKE puts one pod on each TPU node. That pod uses all of the chips on the node. Two
-> pods cannot share a TPU chip.
-
-A TPU notebook therefore holds a full machine while the browser tab stays open. For 300
-students, this is 300 chips. The chips stay allocated when nobody runs code.
-
-## The design
-
-Keep the notebook and the chip separate.
-
-**Tier 1, the notebook.** Each student gets a JupyterLab pod with a CPU only. The pod
-stays available. The student writes code in the pod. The student also debugs code and
-reads the assignment in the pod. GKE bills this pod by its CPU request and its memory
-request.
-
-**Tier 2, the chip.** TPU work leaves the notebook as a Kubernetes Job.
+**The chip.** TPU work leaves the notebook as a Kubernetes Job.
 [Kueue](https://kueue.sigs.k8s.io/) puts the job in a queue for a shared pool of chips.
-`notebooks/submit_tpu.py` sends the job. It then waits, and it returns the output to the
-notebook.
+`notebooks/submit_tpu.py` sends the job, waits, and returns the output to the notebook.
 
 ```python
 import submit_tpu
@@ -55,48 +37,23 @@ submitted tpu-ada-04ab51c3 to queue 'tpu'
 devices: [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0)]
 ```
 
-A student holds a chip only while the job runs. Other students continue to work.
+A student holds a chip only while the job runs.
 
-GKE Autopilot builds the TPU node when a job needs one. Autopilot removes the node after
-the job ends. Kueue controls the order of admission. Cohort borrowing lets an idle lab
-section lend its chips to a busy lab section.
-
-## Compare Vertex AI custom training first
-
-Vertex AI custom training jobs run on TPU v5e and v6e. A CPU notebook sends a
-`CustomJob`. Google operates the queue and the machines. The design is the same as this
-repository, but you do not operate a cluster.
-
-| item | this repository | Vertex custom jobs |
-|---|---|---|
-| second run of the same code | 15 s from a warm pool | a new container each time |
-| fair share | Kueue cohorts, quota for each section | first come, on project quota |
-| operations | you operate GKE and JupyterHub | none |
-| isolation | you must add GKE Sandbox | one managed VM for each job |
-
-Vertex removes five of the seven failures in this document. All five failures come from
-JupyterHub on Autopilot.
-
-Select the option by the type of assignment. Vertex is correct for batch homework. In
-batch homework, a student writes code and reads the results later. This repository is
-correct for iterative work. In iterative work, a student changes one line and runs the
-code again.
-
-Vertex AI *endpoints* are a different product. An endpoint serves a model that you
-deploy. An endpoint does not run student code.
+GKE Autopilot builds a TPU node when a job needs one, and removes the node after the job
+ends. Kueue controls the order of admission. Four lab sections share one cohort, so an
+idle section lends its chips to a busy section.
 
 ## Quick start
 
-You must have a GCP project with billing. You must also have `gcloud`, `kubectl`, and
-`helm`.
+You need a GCP project with billing, `gcloud`, `kubectl`, and `helm`.
 
 ```bash
 make preflight PROJECT=my-project     # read-only, no cost
 make demo      PROJECT=my-project     # cluster, hub, and one TPU job (about 20 min)
 ```
 
-`make demo` prints a port-forward command when it completes. Open the hub. Log in with
-any username. Open `hw0_tpu_hello.ipynb`. Run the first cell.
+`make demo` prints a port-forward command when it completes. Open the hub, log in with
+any username, open `hw0_tpu_hello.ipynb`, and run the first cell.
 
 ```bash
 make scale    PROJECT=my-project      # 100 students through 32 chips, with times
@@ -108,32 +65,25 @@ three lists are empty, nothing bills.
 
 ## Speed
 
-A warm pool contains a node that an earlier job left in place. A cold pool contains no
-node. Autopilot must build one.
+A warm pool contains a TPU node that an earlier job left in place. A cold pool contains
+no node, so Autopilot must build one.
 
 | condition | time from `run()` to output |
 |---|---:|
 | warm pool | **15 s** |
 | cold pool | **2 min 37 s** |
 
-Autopilot keeps an idle TPU node for several minutes. Most students therefore get a warm
-pool during an active assignment period.
+In a cold run, the node build takes 99 of the 157 seconds.
 
-The first run of the day always uses a cold pool. Tell the students this. If you do not,
-they report a fault. For the same reason, `submit_tpu.run()` prints each change of
-state:
+Autopilot keeps an idle TPU node for several minutes, so most students get a warm pool
+during an active assignment period. The first run of the day uses a cold pool.
 
-```
-submitted tpu-ada-04ab51c3 to queue 'tpu'
-  admitted after 5s in queue
-```
-
-A student who sees these two lines knows that the system operates correctly.
+Each run starts a new container, so about 10 seconds of JAX and libtpu initialization
+applies to every run. No state carries between runs.
 
 ## Cost
 
-The rates are for us-west4, on-demand, and are correct at the time of writing. Check the
-current rates before you use them.
+Rates are for us-west4, on-demand. Check the current rates before you use them.
 
 | item | rate | billed while |
 |---|---:|---|
@@ -145,38 +95,141 @@ current rates before you use them.
 
 Two unit costs come from these rates:
 
-- **One TPU job costs $0.040.** The 300 students used 8.84 chip-hours in total. This is
-  106 seconds of chip time for each student.
-- **One open notebook costs $0.289 for each hour.** This is the default profile of 4
-  vCPU and 16 GiB.
+- **One TPU job costs $0.040.** This is the measured mean of 106 seconds of chip time.
+  A short debug run of about 15 seconds costs $0.006.
+- **One open notebook costs $0.289 for each hour** at the default 4 vCPU and 16 GiB.
 
-### The notebook costs more than the chip
+### One hour with 100 students
 
-Calculate your own total. Two values control it. This repository measures neither value:
+| runs for each student | chips needed | TPU | notebooks and cluster | total |
+|---:|---:|---:|---:|---:|
+| 2 | 6 | $8 | $29 | **$37** |
+| 5 | 15 | $20 | $29 | **$49** |
+| 10 | 29 | $40 | $29 | **$69** |
+| 20 | 59 | $80 | $29 | **$109** |
+
+### Where the cost goes
+
+A notebook that stays open for one hour costs the same as 7 TPU runs. At 2 runs for each
+student, the notebooks are 78% of the total.
+
+The idle culler therefore controls more of the bill than the size of the chip pool.
+`k8s/jupyterhub-values.yaml` sets it to 60 minutes.
+
+Two changes reduce the notebook cost:
+
+1. Decrease the default profile to 2 vCPU and 8 GiB. This makes the notebook rate half as
+   large, and the typical hour above costs about $35.
+2. Decrease the cull timeout. A shorter timeout starts more sessions again, so balance it
+   against the 2 minute cold start.
+
+Calculate your own total with this equation. Measure both inputs from one assignment,
+because this repository measures neither:
 
 ```
 cost for each student = (runs x $0.040) + (hours the notebook stays open x $0.289)
 ```
 
-A notebook that stays open for one hour costs the same as 7 TPU runs.
+## Capacity
 
-The idle culler is therefore the most important cost control in this repository. The
-size of the chip pool is less important. `k8s/jupyterhub-values.yaml` sets the culler to
-60 minutes. A student closes a laptop but does not log out. The pod stops one hour later.
+| item | limit | source |
+|---|---:|---|
+| notebooks open at the same time | 370 | regional `CPUS` quota of 1500, at 4 vCPU each |
+| TPU chips at the same time | 512 | `TPU_LITE_PODSLICE_V5` quota for each region |
+| TPU chips at the same time, Spot | 1536 | `PREEMPTIBLE_TPU_LITE_PODSLICE_V5` |
 
-Two changes decrease the largest cost:
+Both quotas are project defaults. Raise either with a quota request.
 
-1. Decrease the default profile to 2 vCPU and 8 GiB. This makes the notebook rate half
-   as large.
-2. Decrease the cull timeout. A shorter timeout starts more sessions again. Balance this
-   against the 2 minute cold start.
+Concurrent chips are not the same as class size. The 300 students in the measured run
+used 64 chips, because each student held a chip only while a job ran.
 
-Measure your own class before you calculate the cost of a term. Count the runs for each
-student and the hours for each notebook from one assignment. Then use the equation above.
+## Configuration
+
+All of these are environment overrides on the scripts, or values in the Makefile.
+
+| variable | default | effect |
+|---|---|---|
+| `PROJECT` | none, required | GCP project |
+| `REGION` | `us-west4` | cluster region |
+| `POOL_CHIPS` | 32 | total chips across all sections |
+| `SECTIONS` | `a b c d` | one namespace and one queue for each section |
+| `CLUSTER` | `tpu-notebooks` | cluster name |
+
+`02_create_cluster.sh` divides `POOL_CHIPS` by the number of sections and by the number
+of flavors. Kueue quota applies to each pair of flavor and resource, and the flavors add
+together into the capacity of the queue.
+
+JupyterHub supplies three profiles in `k8s/jupyterhub-values.yaml`:
+
+| profile | resources | who |
+|---|---|---|
+| Course default, CPU notebook | 4 vCPU, 16 GiB | students |
+| Large CPU notebook | 8 vCPU, 32 GiB | students |
+| Pinned TPU v5e notebook | 1 chip attached | staff only |
+
+The pinned profile attaches a chip for the life of the notebook, at $1.35 for each hour.
+`allowed_groups` limits it to staff.
+
+## Changes to make before students use this
+
+- **Authentication.** This repository supplies the dummy authenticator. Any username
+  operates, and no password is necessary. Replace it with `GoogleOAuthenticator` for your
+  domain.
+- **Ingress.** Use IAP-backed Ingress instead of the port-forward. Then delete the
+  `jupyter_server_config.py` entry from `k8s/jupyterhub-values.yaml`, which relaxes the
+  cross-origin check for the port-forward only.
+- **Sandbox.** Student code is not trusted. Enable GKE Sandbox (gVisor) on student pods.
+- **Namespaces.** This repository uses one namespace for each section. One namespace for
+  each student gives better isolation.
+- **A course image** that contains JAX and the Kubernetes client. This image replaces the
+  `postStart` installation and decreases the cold start.
+- **A reservation**, but only for a synchronous lab in which all students run code in the
+  same minute. That condition needs one chip for each student.
+
+## Troubleshooting
+
+**A cell stays at `[*]` and the browser shows no error.** You reach the hub through
+`kubectl port-forward`. Jupyter compares the browser `Origin` header with its own `Host`
+header, and the port-forward makes the two different. The notebook pod log shows
+`Blocking Cross Origin API request`. `k8s/jupyterhub-values.yaml` mounts a configuration
+file that relaxes this check.
+
+**`submit_tpu.run()` reports a connection timeout to the API server.** The singleuser
+NetworkPolicy must permit the API server endpoint, not the `kubernetes` ClusterIP.
+Dataplane V2 applies policy after the Service DNAT, so a rule for the ClusterIP never
+matches. `03_deploy_hub.sh` resolves the endpoint with:
+
+```bash
+kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}'
+```
+
+**A notebook pod never appears, and the hub log shows HTTP 400 from GKE Warden.** The
+JupyterHub `block-cloud-metadata` initContainer is privileged and Autopilot rejects it.
+`k8s/jupyterhub-values.yaml` disables it. This is safe only when Workload Identity
+operates in `GKE_METADATA` mode. Confirm with:
+
+```bash
+gcloud container clusters describe CLUSTER --format="value(workloadIdentityConfig.workloadPool)"
+```
+
+**A quota request is refused or has no effect.** TPU v5e has two quota families. GKE and
+the TPU API use PodSlice quota (`ct5lp-`), also for a single chip. Device quota (`ct5l-`)
+does not apply. `00_preflight.sh` prints both.
+
+**Jobs stay in the queue and no node appears.** Check the pool and the zone:
+
+```bash
+kubectl get workloads -A
+kubectl get clusterqueue
+kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=tpu-v5-lite-podslice
+```
+
+`01_spray_v5e.sh` sends a real request to several zones. It separates a zone with no
+capacity at this moment from a zone that can never supply the request.
 
 ## Measured results
 
-One run, 2026-08-13, `us-west4`. Four lab sections share one Kueue cohort.
+One run, `us-west4`. Four lab sections share one Kueue cohort.
 
 | metric | value |
 |---|---:|
@@ -190,106 +243,22 @@ One run, 2026-08-13, `us-west4`. Four lab sections share one Kueue cohort.
 | job run time p50 | 52 s |
 | chip-hours used | 8.84 |
 
-Compare this with one dedicated chip for each student in the same session:
+One dedicated chip for each of the 300 students would use 54.5 chip-hours and cost
+$73.58 over the same period.
 
-| method | chip-hours | cost |
-|---|---:|---:|
-| one chip for each student | 54.5 | $73.58 |
-| queued | 8.84 | $11.93 |
+Notebook spawning is measured separately. 50 concurrent logins produced 50 notebooks,
+with p50 137 s and p95 191 s.
 
-The queue uses 6.2 times less chip time. It supports the same 300 students in the same
-wall clock time. The ratio increases with the length of the assignment. The ratio follows
-the part of the session in which a student runs code.
-
-Notebook spawning fails in a different way. It is therefore measured separately. 50
-concurrent logins produced 50 notebooks. The success rate was 100%, p50 was 137 s, and
-p95 was 191 s.
-
-To do these measurements again, use `scripts/04_scale_test.py` and
+To repeat both measurements, use `scripts/04_scale_test.py` and
 `scripts/06_hub_spawn_test.py`. Each value comes from a Kueue Workload condition
 timestamp or from a Job status field.
-
-## Seven failures that report the wrong cause
-
-**1. `TPU_LITE_DEVICE_V5` is the wrong quota.** TPU v5e has two quota families. GKE and
-the TPU API both use PodSlice quota (`ct5lp-`). They use it also for a single chip.
-Device quota (`ct5l-`) is usually 0, and it does not apply. A request to increase the
-wrong quota wastes a support cycle. `00_preflight.sh` prints both quotas.
-
-**2. Kueue v1beta2 has a new name for `cohort`.** Use `cohortName`. The old name fails
-with `unknown field "spec.cohort"`.
-
-**3. Kueue flavors increase the capacity. They are not an overflow inside it.** A queue
-with `v5e-ondemand: 8` and `v5e-flex: 8` holds 16 chips. It does not hold 8 chips with a
-fallback. Four sections with this configuration make a pool of 64 chips when you intend
-32. No error occurs. You buy two times the number of chips that you planned.
-`02_create_cluster.sh` divides by the sections and also by the flavors.
-
-**4. Autopilot rejects the JupyterHub `block-cloud-metadata` initContainer.** The
-container is privileged and requests `NET_ADMIN`. The GKE Warden webhook returns HTTP
-400. The pod does not start. The cause is visible only in the hub log.
-
-Disable the container only if Workload Identity operates in `GKE_METADATA` mode. In that
-mode, the metadata server already separates the pod from the node service account.
-Confirm the mode first:
-
-```bash
-gcloud container clusters describe CLUSTER --format="value(workloadIdentityConfig.workloadPool)"
-```
-
-**5. Dataplane V2 applies NetworkPolicy after the Service DNAT.** JupyterHub denies
-egress from student pods to private IP ranges. This denies access to the API server that
-`submit_tpu.py` uses.
-
-A rule that permits the `kubernetes` ClusterIP never matches. Policy runs after the
-address becomes the private endpoint of the control plane. That endpoint is inside the
-excluded range `10.0.0.0/8`. The result is a connection timeout to an address that the
-policy appears to permit.
-
-Permit the endpoint instead:
-
-```bash
-kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}'
-```
-
-Do not set `privateIPs: true`. That setting permits student code to reach each other
-student notebook.
-
-**6. A `kubectl port-forward` connection stops the kernel and shows no error.** Jupyter
-compares the browser `Origin` header with its own `Host` header. A port-forward makes the
-two headers different. Each websocket returns HTTP 403. The kernel does not connect. A
-cell stays at `[*]`, and the browser shows no error. The only record is `Blocking Cross
-Origin API request` in the notebook pod log.
-
-`jupyterhub-values.yaml` mounts a configuration file that relaxes this check. Delete that
-file when you use an Ingress.
-
-**7. A TPU node pool in `ERROR` with `RESOURCE_EXHAUSTED` is a pending request.** The
-pool can recover one hour later. If you delete the pool, the wait starts again. This
-repository uses Autopilot and does not have this condition. GKE Standard does have it.
-
-## Changes to make before students use this
-
-- **Authentication.** This repository supplies the dummy authenticator. Any username
-  operates, and no password is necessary. Replace it with `GoogleOAuthenticator` for your
-  domain.
-- **Ingress.** The demonstration uses a port-forward. Use IAP-backed Ingress instead.
-  This also removes failure 6.
-- **Sandbox.** Student code is not trusted. Enable GKE Sandbox (gVisor) on student pods.
-- **Namespaces.** This repository uses one namespace for each section. One namespace for
-  each student gives better isolation.
-- **A course image** that contains JAX and the Kubernetes client. This image replaces the
-  `postStart` installation and decreases the cold start.
-- **A reservation**, but only for a synchronous lab. In a synchronous lab, all students
-  run code in the same minute. That condition needs one chip for each student. The queue
-  design is for asynchronous homework.
 
 ## Layout
 
 ```
 scripts/
   00_preflight.sh        quota, zones, accelerator types. Read-only.
-  01_spray_v5e.sh        separate "no capacity now" from "not possible here"
+  01_spray_v5e.sh        test which zones can supply a chip
   02_create_cluster.sh   Autopilot cluster, Kueue, section queues
   03_deploy_hub.sh       JupyterHub, student RBAC, API endpoint egress rule
   04_scale_test.py       N students through M chips, timed from Kueue conditions
@@ -299,24 +268,17 @@ scripts/
 k8s/
   kueue-tpu-queues.yaml  ResourceFlavors, section ClusterQueues, LocalQueues
   student-tpu-job.yaml   the TPU Job for one student
-  jupyterhub-values.yaml three profiles and the Autopilot corrections
+  jupyterhub-values.yaml three profiles and the Autopilot settings
 notebooks/
   hw0_tpu_hello.ipynb    an assignment on attention, the roofline, and flash attention
   submit_tpu.py          the helper that sends notebook code to a chip
 ```
 
-## Notes on the chip
+## Using a different TPU generation
 
-This repository uses v5e (`v5litepod-1`, one chip, `ct5lp-hightpu-1t`) for three reasons.
-It has the lowest price of the current TPUs. Its single-chip topology is the correct unit
-for one student. Its DWS Flex pools have less contention than newer generations. In the
-measured run, 49 of the 80 TPU nodes came from flex-start at half of the on-demand price.
-
-No part of the design needs v5e. To use a different generation, change the two
-`nodeSelector` labels and the ResourceFlavor.
-
-The JupyterHub TPU profile pattern is `extra_resource_limits` with `node_selector`. It
-comes from [ai-on-gke](https://github.com/ai-on-gke/quick-start-guides). That template
-uses TPU v4. One region supplies v4, and v4 has no DWS Flex path.
+This repository uses v5e (`v5litepod-1`, one chip, `ct5lp-hightpu-1t`). To use another
+generation, change the two `nodeSelector` labels in `k8s/student-tpu-job.yaml` and
+`notebooks/submit_tpu.py`, and the matching `nodeLabels` in `k8s/kueue-tpu-queues.yaml`.
+Confirm that your project holds quota for that generation with `00_preflight.sh`.
 
 Apache 2.0.
