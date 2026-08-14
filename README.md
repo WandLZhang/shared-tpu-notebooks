@@ -186,47 +186,6 @@ The pinned profile attaches a chip for the life of the notebook, at $1.35 for ea
 - **A reservation**, but only for a synchronous lab in which all students run code in the
   same minute. That condition needs one chip for each student.
 
-## Troubleshooting
-
-**A cell stays at `[*]` and the browser shows no error.** You reach the hub through
-`kubectl port-forward`. Jupyter compares the browser `Origin` header with its own `Host`
-header, and the port-forward makes the two different. The notebook pod log shows
-`Blocking Cross Origin API request`. `k8s/jupyterhub-values.yaml` mounts a configuration
-file that relaxes this check.
-
-**`submit_tpu.run()` reports a connection timeout to the API server.** The singleuser
-NetworkPolicy must permit the API server endpoint, not the `kubernetes` ClusterIP.
-Dataplane V2 applies policy after the Service DNAT, so a rule for the ClusterIP never
-matches. `03_deploy_hub.sh` resolves the endpoint with:
-
-```bash
-kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}'
-```
-
-**A notebook pod never appears, and the hub log shows HTTP 400 from GKE Warden.** The
-JupyterHub `block-cloud-metadata` initContainer is privileged and Autopilot rejects it.
-`k8s/jupyterhub-values.yaml` disables it. This is safe only when Workload Identity
-operates in `GKE_METADATA` mode. Confirm with:
-
-```bash
-gcloud container clusters describe CLUSTER --format="value(workloadIdentityConfig.workloadPool)"
-```
-
-**A quota request is refused or has no effect.** TPU v5e has two quota families. GKE and
-the TPU API use PodSlice quota (`ct5lp-`), also for a single chip. Device quota (`ct5l-`)
-does not apply. `00_preflight.sh` prints both.
-
-**Jobs stay in the queue and no node appears.** Check the pool and the zone:
-
-```bash
-kubectl get workloads -A
-kubectl get clusterqueue
-kubectl get nodes -l cloud.google.com/gke-tpu-accelerator=tpu-v5-lite-podslice
-```
-
-`01_spray_v5e.sh` sends a real request to several zones. It separates a zone with no
-capacity at this moment from a zone that can never supply the request.
-
 ## Measured results
 
 One run, `us-west4`. Four lab sections share one Kueue cohort.
