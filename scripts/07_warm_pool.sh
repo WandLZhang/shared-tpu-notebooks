@@ -13,8 +13,8 @@ PROJECT="${PROJECT:-${PROJECT:?set PROJECT to your GCP project id}}"
 REGION="${REGION:-us-west4}"
 CLUSTER="${CLUSTER:-tpu-notebooks}"
 NAMESPACE="${NAMESPACE:-class-sec-a}"
-CHIP_HR="${CHIP_HR:-1.20}"          # v5e on-demand, us-west4
-DEFAULT_REPLICAS="${DEFAULT_REPLICAS:-4}"
+CHIP_HR="${CHIP_HR:-1.35}"   # v5e node-billed on Autopilot: base chip rate + premium
+DEFAULT_REPLICAS="${DEFAULT_REPLICAS:-1}"
 
 # Pin the context. The default kubectl context in this workspace drifted to an unrelated
 # cluster three times in one session, and a drifted context silently targets the wrong

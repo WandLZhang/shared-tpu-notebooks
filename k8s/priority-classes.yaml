@@ -1,0 +1,68 @@
+# Priority for the classroom control plane and for student notebooks.
+#
+# WHY THIS EXISTS
+#
+# On 2026-08-18, during a 300-student scale test, a running student notebook was evicted:
+#
+#   Preempted  pod/jupyter-admin  Preempted by pod ac38ea06-... on node ...-svk8
+#
+# Everything in this deployment ran at priority 0 -- hub, proxy and notebooks alike. GKE
+# added CSI DaemonSets to that node (parallelstore, filestore, gcsfuse), all of which run
+# at system-node-critical, priority 2000001000. The node had no room, and the notebook was
+# the only pod on it that could be evicted. The student lost their session, and then could
+# not get back in because every CPU node was full.
+#
+# The earlier claim that "TPU jobs and notebooks never touch the same nodes" was true about
+# where pods are SCHEDULED and wrong about the consequences. Building 35 TPU nodes forces
+# system DaemonSets across the cluster and squeezes the CPU nodes the notebooks live on.
+#
+# THE ORDERING, AND THE REASONING BEHIND IT
+#
+# A notebook holds live state and has a person sitting in front of it. Losing one destroys
+# unsaved work and takes minutes to rebuild. A TPU job is fungible: it is already queued,
+# it is restartable, and waiting in line is the experience students expect anyway.
+#
+# So chips yield and notebooks do not. Before this file everything ran at priority 0, which
+# meant a TPU job and a student's session were equally disposable. That was backwards.
+#
+#   jupyterhub-core   900000   hub and proxy. Losing the proxy cuts off every live session.
+#   student-notebook  800000   someone is sitting here. Protect it.
+#   student-tpu-job      100   fungible. Kueue re-queues it and the student waits.
+#   tpu-warm             -10   exists to be evicted. See tpu-warm-pool.yaml.
+#
+# WHAT PRIORITY DOES NOT FIX
+#
+# It does not beat system-node-critical at 2000001000. Nothing you can set will, so a
+# DaemonSet that must run on a node still wins. Priority only orders everything below that.
+#
+# Headroom is what stops the eviction from being necessary in the first place. The student
+# profile dropped from 4 vCPU to 2 for that reason: at 4 vCPU a notebook nearly filled its
+# node, so any new system pod had to evict something, and the notebook was the only
+# candidate. Priority plus headroom together; neither alone is enough.
+#
+# 100 is deliberately above GKE's -10 expendable cutoff. Below that the autoscaler stops
+# building nodes for pending pods, and student TPU jobs would never get capacity at all.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: jupyterhub-core
+value: 900000
+globalDefault: false
+description: "Hub and proxy. Losing the proxy cuts off every live student session."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: student-notebook
+value: 800000
+globalDefault: false
+description: "A live student session. Protect this ahead of any batch work."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: student-tpu-job
+value: 100
+globalDefault: false
+description: "Fungible TPU work. Yields to notebooks; Kueue re-queues it."

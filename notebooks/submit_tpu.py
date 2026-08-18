@@ -80,6 +80,8 @@ def run(code: str, timeout: int = 1800, keep: bool = False) -> str:
             template=client.V1PodTemplateSpec(
                 spec=client.V1PodSpec(
                     restart_policy="Never",
+                    # Fungible: yields to notebooks, Kueue re-queues it.
+                    priority_class_name="student-tpu-job",
                     node_selector={
                         "cloud.google.com/gke-tpu-accelerator": "tpu-v5-lite-podslice",
                         "cloud.google.com/gke-tpu-topology": "1x1",

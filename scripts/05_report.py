@@ -19,8 +19,9 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 RESULTS = HERE.parent / "results"
 
-# us-west4 v5e on-demand, per chip-hour, from cloud.google.com/tpu/pricing.
-CHIP_HR = 1.20
+# v5e on Autopilot is node-billed: the $1.20 base chip rate plus the Autopilot
+# accelerator premium. Use the base rate alone and every total here reads low.
+CHIP_HR = 1.35
 
 
 def pct(xs: list[float], p: float) -> float:

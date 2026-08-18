@@ -148,14 +148,67 @@ cost for each student = (runs x $0.040) + (hours the notebook stays open x $0.28
 
 | item | limit | source |
 |---|---:|---|
-| notebooks open at the same time | 370 | regional `CPUS` quota of 1500, at 4 vCPU each |
+| notebooks open at the same time | about 374 | regional `CPUS` quota of 1500 |
 | TPU chips at the same time | 512 | `TPU_LITE_PODSLICE_V5` quota for each region |
 | TPU chips at the same time, Spot | 1536 | `PREEMPTIBLE_TPU_LITE_PODSLICE_V5` |
 
-Both quotas are project defaults. Raise either with a quota request.
+All three are project defaults. Raise any of them with a quota request.
+
+Work the notebook number out from whole nodes, not from vCPU alone. Autopilot gives an
+8 vCPU node with about 7.9 allocatable, GKE system pods take about 2.6, and a 2 vCPU
+notebook therefore fits twice per node. A quota of 1500 vCPU buys 187 nodes, so about
+374 notebooks. Dividing 1500 by the profile size and getting 750 ignores the system pods
+and the packing, and overstates the ceiling by double.
 
 Concurrent chips are not the same as class size. The 300 students in the measured run
 used 64 chips, because each student held a chip only while a job ran.
+
+## Scaling to 500 students
+
+Only one thing blocks 500, and it is not the TPUs.
+
+**Raise the `CPUS` quota.** 500 notebooks at 2 per node is 250 nodes, which is 2000 vCPU
+against a default of 1500. Request 2400 in your region for headroom. This is a routine
+request and it is free.
+
+**TPU quota needs no change.** 512 on-demand chips and 1536 Spot chips already sit unused
+in every region. A 500-student course does not come close.
+
+**Storage grows with the roster.** 500 students at 10Gi each is 5 TB of pd-balanced
+standing for the whole term, roughly $500 per month. Plan the end-of-term cleanup before
+you start, because `reclaimPolicy` is `Delete` and there are no backups.
+
+Then size the pool and the sections:
+
+```bash
+# 500 students, 128 chips, 6 sections
+POOL_CHIPS=128 SECTIONS="a b c d e f" make cluster PROJECT=my-project
+```
+
+`POOL_CHIPS` divides by sections and by the two resource flavors, so 128 across 6 sections
+is 10 chips for each section on each flavor. Keep it divisible or you lose the remainder.
+
+What to expect, projected from the measured 300-student run and marked as projection
+rather than measurement:
+
+| | measured, 300 students | projected, 500 students |
+|---|---:|---:|
+| pool | 64 chips | 128 chips |
+| wall clock to drain | 3.0 min | about 3 min |
+| chip-hours | 6.35 | about 10.6 |
+| TPU cost for one burst | $8.57 | about $14.30 |
+| cost for each student | $0.029 | $0.029 |
+
+Cost for each student stays flat because the bill tracks chip-seconds consumed, not pool
+size. A larger pool buys shorter queues, not a larger invoice.
+
+Verify the projection before you trust it:
+
+```bash
+make warm-on PROJECT=my-project
+./.venv/bin/python scripts/04_scale_test.py --students 500 --chips 128
+./.venv/bin/python scripts/05_report.py
+```
 
 ## Configuration
 
@@ -258,9 +311,30 @@ notebooks/
 
 ## Using a different TPU generation
 
-This repository uses v5e (`v5litepod-1`, one chip, `ct5lp-hightpu-1t`). To use another
-generation, change the two `nodeSelector` labels in `k8s/student-tpu-job.yaml` and
-`notebooks/submit_tpu.py`, and the matching `nodeLabels` in `k8s/kueue-tpu-queues.yaml`.
-Confirm that your project holds quota for that generation with `00_preflight.sh`.
+This repository uses v5e (`v5litepod-1`, one chip, `ct5lp-hightpu-1t`). The accelerator
+and topology are written into four files rather than a single variable, so a swap is a
+find and replace across all of them:
+
+| file | what to change |
+|---|---|
+| `k8s/student-tpu-job.yaml` | the two `nodeSelector` labels |
+| `notebooks/submit_tpu.py` | the two `node_selector` entries |
+| `k8s/kueue-tpu-queues.yaml` | `nodeLabels` on both ResourceFlavors |
+| `k8s/tpu-warm-pool.yaml` | the two `nodeSelector` labels on the placeholder |
+
+```bash
+grep -rn "tpu-v5-lite-podslice" k8s/ notebooks/
+```
+
+Miss one and the failure is quiet rather than loud. A warm pool still holding v5e labels
+warms the wrong node shape, so student jobs keep paying a cold build while the placeholders
+sit on chips nobody uses.
+
+Change `CHIP_HR` in `scripts/05_report.py` too, or every cost figure it prints stays at the
+v5e rate.
+
+Confirm your project holds quota for the new generation with `00_preflight.sh` first. The
+quota metric name changes with the generation, and asking support for the wrong one is a
+wasted round trip.
 
 Apache 2.0.

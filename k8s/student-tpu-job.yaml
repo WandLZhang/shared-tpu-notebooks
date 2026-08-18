@@ -1,14 +1,15 @@
 # One student's TPU homework run. This is the unit the whole classroom is built from.
 #
-# GKE controls the structure below. These are not preferences.
+# Shape notes, all of which are forced by GKE and not by preference:
 #
-#   * GKE puts one pod on each TPU node. That pod uses all of the chips on the node.
-#     Two students cannot share a v5e chip. A ct5lp-hightpu-1t node has one chip.
-#     A request for google.com/tpu: 1 therefore uses the full node.
-#   * On Autopilot you do not name the machine type. The two nodeSelector labels below
-#     make GKE select ct5lp-hightpu-1t. Autopilot then bills the full node, which is
-#     24 vCPU and 48 GiB, while the pod runs. Keep each job short.
-#   * The google.com/tpu toleration is necessary. TPU nodes have a NoSchedule taint.
+#   * One pod per TPU node, and the pod takes every chip on that node. A v5e chip
+#     cannot be split between two students. ct5lp-hightpu-1t has exactly one chip,
+#     so google.com/tpu: 1 consumes the node.
+#   * On Autopilot you do not name the machine type. The two nodeSelector labels
+#     below are what make GKE pick ct5lp-hightpu-1t, and Autopilot then bills the
+#     whole node (24 vCPU, 48 GiB) for as long as the pod runs. Short jobs are the
+#     point.
+#   * The google.com/tpu toleration is required. TPU nodes carry a NoSchedule taint.
 #
 # The kueue.x-k8s.io/queue-name label is what holds this job in a queue instead of
 # letting 300 of them stampede the chip pool at once. Drop the label and the job
@@ -25,7 +26,7 @@ metadata:
   namespace: __NAMESPACE__
   labels:
     kueue.x-k8s.io/queue-name: __QUEUE__
-    tpu-notebooks/student: __STUDENT__
+    tpu-class/student: __STUDENT__
 spec:
   # Kueue suspends the job on admission control, so let it own the lifecycle.
   suspend: true
@@ -35,9 +36,13 @@ spec:
   template:
     metadata:
       labels:
-        tpu-notebooks/student: __STUDENT__
+        tpu-class/student: __STUDENT__
     spec:
       restartPolicy: Never
+      # Fungible on purpose. This yields to a student notebook, which holds live state,
+      # and Kueue simply re-queues it. 100 stays above GKE's -10 expendable cutoff so the
+      # autoscaler still builds nodes for it. See k8s/priority-classes.yaml.
+      priorityClassName: student-tpu-job
       nodeSelector:
         cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
         cloud.google.com/gke-tpu-topology: 1x1

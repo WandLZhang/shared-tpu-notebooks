@@ -1,4 +1,4 @@
-# Zero to JupyterHub for the the university LLM course.
+# Zero to JupyterHub for a university LLM course.
 #
 # Read the profile list first. It contains the reason for the design.
 #
@@ -21,7 +21,7 @@
 hub:
   config:
     Authenticator:
-      # Local part of the instructor's email, i.e. everything before the @.
+      # Local part of the Google identity IAP forwards, i.e. everything before the @.
       admin_users:
         - instructor
       # IAP decides who gets in. Anyone reaching the hub has already been checked by
@@ -98,6 +98,8 @@ hub:
   pdb:
     enabled: true
     minAvailable: 1
+  extraPodSpec:
+    priorityClassName: jupyterhub-core
 
 proxy:
   service:
@@ -116,6 +118,8 @@ proxy:
     pdb:
       enabled: true
       minAvailable: 1
+    extraPodSpec:
+      priorityClassName: jupyterhub-core
 
 # Both of these are off for Autopilot.
 #   userScheduler packs users onto the fewest nodes so the rest can scale down. On
@@ -223,6 +227,12 @@ singleuser:
   # Service account the notebook uses to submit TPU Jobs. Bound by RBAC in
   # 03_deploy_hub.sh to create Jobs in its own namespace and nothing else.
   serviceAccountName: student
+  # A notebook holds live state and a person is waiting on it. TPU jobs are fungible and
+  # get student-tpu-job (100) instead, so chips yield and sessions do not. Before this,
+  # everything sat at priority 0 and a running notebook was evicted mid-session during a
+  # scale test. See k8s/priority-classes.yaml.
+  extraPodConfig:
+    priorityClassName: student-notebook
   extraEnv:
     KUEUE_LOCAL_QUEUE: "tpu"
     # submit_tpu.py is mounted here rather than into /home/jovyan, because the home
@@ -287,14 +297,19 @@ singleuser:
   profileList:
     - display_name: "Course default — CPU notebook"
       description: >-
-        4 vCPU, 16 GB. Where you write and debug. Run TPU work from here with
+        2 vCPU, 8 GB. Where you write and debug. Run TPU work from here with
         submit_tpu.run(); the chip is attached only while your job runs.
       default: true
+      # 2 vCPU, not 4. The heavy work happens on the chip, so a notebook that only edits
+      # code and submits jobs does not need more. Three things improve at once: two
+      # notebooks fit per node instead of one, the concurrent-notebook ceiling roughly
+      # doubles on the same CPUS quota, and each node keeps enough slack that a new system
+      # DaemonSet no longer has to evict a student to fit.
       kubespawner_override:
-        cpu_limit: 4
-        cpu_guarantee: 4
-        mem_limit: 16G
-        mem_guarantee: 16G
+        cpu_limit: 2
+        cpu_guarantee: 2
+        mem_limit: 8G
+        mem_guarantee: 8G
 
     - display_name: "Large CPU notebook"
       description: >-
@@ -309,7 +324,7 @@ singleuser:
     - display_name: "Pinned TPU v5e notebook (staff only)"
       description: >-
         One v5e chip attached to the notebook for as long as it runs, for interactive
-        debugging. Bills the whole ct5lp-hightpu-1t node at about $1.20/hr. Staff only,
+        debugging. Bills the whole ct5lp-hightpu-1t node at about $1.35/hr. Staff only,
         because a class of 300 doing this is $360/hr.
       allowed_groups:
         - staff
