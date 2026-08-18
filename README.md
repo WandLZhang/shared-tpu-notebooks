@@ -52,11 +52,19 @@ make preflight PROJECT=my-project     # read-only, no cost
 make demo      PROJECT=my-project     # cluster, hub, and one TPU job (about 20 min)
 ```
 
-`make demo` prints a port-forward command when it completes. Open the hub, log in with
-any username, open `hw0_tpu_hello.ipynb`, and run the first cell.
+Then put the hub behind HTTPS and Google sign-in. Run this once per cluster:
 
 ```bash
+make iap PROJECT=my-project           # prints the URL when the certificate is ready
+```
+
+Open that URL, sign in with a Google account in your organization, open
+`hw0_tpu_hello.ipynb`, and run the first cell.
+
+```bash
+make warm-on  PROJECT=my-project      # hold 1 chip ready so the first run is quick
 make scale    PROJECT=my-project      # 100 students through 32 chips, with times
+make warm-off PROJECT=my-project      # warm chips bill continuously
 make teardown PROJECT=my-project      # then read the verification output
 ```
 
@@ -68,15 +76,21 @@ three lists are empty, nothing bills.
 A warm pool contains a TPU node that an earlier job left in place. A cold pool contains
 no node, so Autopilot must build one.
 
-| condition | time from `run()` to output |
-|---|---:|
-| warm pool | **15 s** |
-| cold pool | **2 min 37 s** |
+| condition | pod scheduled | job finished |
+|---|---:|---:|
+| warm pool on | **+0 s** | **21 s** |
+| cold, no node | 2 to 4 min | 157 to 261 s |
 
-In a cold run, the node build takes 99 of the 157 seconds.
+In a cold run the node build takes most of the time. The work itself is about 45 seconds.
 
-Autopilot keeps an idle TPU node for several minutes, so most students get a warm pool
-during an active assignment period. The first run of the day uses a cold pool.
+Do not rely on a node being left warm. Autopilot removes an idle TPU node about two
+minutes after a job ends, and `submit_tpu.run()` deletes the Job as soon as it returns,
+which empties the node right away. Scale-to-zero works against you here.
+
+`make warm-on` holds placeholder pods on TPU nodes instead. A student job outranks a
+placeholder, so the scheduler evicts one and the student lands on a node that already
+runs. The Deployment then warms a replacement node. See `k8s/tpu-warm-pool.yaml` for the
+priority value and the cost.
 
 Each run starts a new container, so about 10 seconds of JAX and libtpu initialization
 applies to every run. No state carries between runs.
@@ -172,12 +186,17 @@ The pinned profile attaches a chip for the life of the notebook, at $1.35 for ea
 
 ## Changes to make before students use this
 
-- **Authentication.** This repository supplies the dummy authenticator. Any username
-  operates, and no password is necessary. Replace it with `GoogleOAuthenticator` for your
-  domain.
-- **Ingress.** Use IAP-backed Ingress instead of the port-forward. Then delete the
-  `jupyter_server_config.py` entry from `k8s/jupyterhub-values.yaml`, which relaxes the
-  cross-origin check for the port-forward only.
+- **A real domain.** `make iap` uses `nip.io`, which maps the load balancer address to a
+  hostname without a DNS zone. That is enough to prove the setup. For a course, register a
+  domain, point an A record at the reserved address, and run
+  `DOMAIN=jupyter.your-university.edu make iap`.
+- **A group on the IAP binding.** `make iap` grants access to the account that runs it.
+  Grant a group instead, and IAP then supplies group claims, which makes `allowed_groups`
+  on the staff profile enforce. Without groups that profile gate does nothing and any user
+  can select the pinned-chip profile.
+- **Cross-origin.** Delete the `jupyter_server_config.py` entry from
+  `k8s/jupyterhub-values.yaml` once you no longer use a port-forward. It relaxes the
+  cross-origin check, and behind an Ingress the check works correctly on its own.
 - **Sandbox.** Student code is not trusted. Enable GKE Sandbox (gVisor) on student pods.
 - **Namespaces.** This repository uses one namespace for each section. One namespace for
   each student gives better isolation.
@@ -223,11 +242,15 @@ scripts/
   04_scale_test.py       N students through M chips, timed from Kueue conditions
   05_report.py           results table
   06_hub_spawn_test.py   concurrent notebook spawn times
+  07_warm_pool.sh        hold warm TPU nodes: on [N] | off | status
+  08_setup_iap.sh        HTTPS and Google sign-in, once for each cluster
   99_teardown.sh         delete all resources, then prove that nothing bills
 k8s/
   kueue-tpu-queues.yaml  ResourceFlavors, section ClusterQueues, LocalQueues
   student-tpu-job.yaml   the TPU Job for one student
   jupyterhub-values.yaml three profiles and the Autopilot settings
+  ingress-iap.yaml       BackendConfig, ManagedCertificate, and Ingress
+  tpu-warm-pool.yaml     PriorityClass and the placeholder Deployment
 notebooks/
   hw0_tpu_hello.ipynb    an assignment on attention, the roofline, and flash attention
   submit_tpu.py          the helper that sends notebook code to a chip

@@ -1,0 +1,83 @@
+# Warm TPU nodes, so the first student of the day doesn't wait for a node build.
+#
+# THE PROBLEM THIS SOLVES
+#
+# Autopilot scales TPU nodes to zero, and submit_tpu.py deletes the Job as soon as it
+# returns. The pod goes away, the node is empty, and Autopilot reaps it about two minutes
+# later. The next student then pays the full cold path: measured at 2m37s once and 4m21s
+# another time, against roughly 45 seconds of actual work.
+#
+# HOW IT WORKS
+#
+# These placeholder pods hold TPU nodes open and do nothing. They run at priority -10.
+# Student Jobs run at the default priority 0, so a student outranks a placeholder: the
+# scheduler evicts one and lands the student on a node that's already running. The
+# Deployment then recreates the placeholder, which warms a replacement node behind them.
+#
+# -10 is not arbitrary. GKE's autoscaler uses -10 as the expendable cutoff. At -10 or
+# above a pending pod still triggers a node build, which is the whole point. Go below it
+# and the placeholders never provision anything.
+#
+# WHAT THIS COSTS
+#
+# Every warm chip bills while it sits there. Four v5e chips is about $4.80/hr on-demand.
+# replicas is 0 here on purpose. Turn it on with scripts/07_warm_pool.sh on, and turn it
+# off when you're done. Forgetting is the expensive failure mode.
+#
+# RELATION TO KUEUE
+#
+# These pods carry no kueue.x-k8s.io/queue-name label, so Kueue doesn't count them and
+# they sit outside the 64-chip ClusterQueue budget. The two add up rather than competing.
+# That's intended: placeholders yield instantly, so they never deny a student a chip.
+#
+# GKE now ships native capacity buffers, with an active-buffer mode aimed at exactly this.
+# That's the cleaner long-term answer than hand-rolled placeholders; this stays because it
+# works on any Kubernetes and shows the mechanism plainly.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: tpu-warm
+value: -10
+# Placeholders must never evict anyone. They only need to be evictABLE.
+preemptionPolicy: Never
+globalDefault: false
+description: "Holds a TPU node warm. Yields to any real workload."
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tpu-warm-pool
+  namespace: __NAMESPACE__
+  labels:
+    app: tpu-warm-pool
+spec:
+  # Off by default. scripts/07_warm_pool.sh scales this.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: tpu-warm-pool
+  template:
+    metadata:
+      labels:
+        app: tpu-warm-pool
+    spec:
+      priorityClassName: tpu-warm
+      # Give up immediately when preempted. The point is to hand the node over fast.
+      terminationGracePeriodSeconds: 0
+      # Same shape as the student Job, or it would warm the wrong kind of node.
+      nodeSelector:
+        cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+        cloud.google.com/gke-tpu-topology: 1x1
+      tolerations:
+        - key: google.com/tpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: pause
+          image: registry.k8s.io/pause:3.9
+          resources:
+            limits:
+              google.com/tpu: "1"
+            requests:
+              google.com/tpu: "1"

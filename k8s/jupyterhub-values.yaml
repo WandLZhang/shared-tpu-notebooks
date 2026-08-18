@@ -1,11 +1,11 @@
-# Zero to JupyterHub, configured for shared TPU access.
+# Zero to JupyterHub for the the university LLM course.
 #
 # Read the profile list first. It contains the reason for the design.
 #
 # GKE gives one pod per TPU node and that pod owns every chip on the node. A v5e chip
-# cannot be shared. A TPU-backed notebook therefore holds a chip at $1.35 for each hour
-# while the browser tab stays open. The chip stays allocated when the student reads the
-# assignment. For 300 students this is $405 for each hour.
+# cannot be shared. A TPU-backed notebook therefore holds a $1.35/hr chip for as long as
+# the browser tab is open, whether the student is running code or reading the
+# assignment. For 300 students that is $405/hr, and most of them are typing.
 #
 # So students get a CPU notebook, and TPU work leaves the notebook as a queued Job
 # (see notebooks/submit_tpu.py). The chip is held for the seconds the job runs.
@@ -21,12 +21,70 @@
 hub:
   config:
     Authenticator:
-      # Swap for GoogleOAuthenticator against your institution domain in real use.
+      # Local part of the instructor's email, i.e. everything before the @.
       admin_users:
-        - professor
-      allowed_groups: []
-    JupyterHub:
-      authenticator_class: dummy
+        - instructor
+      # IAP decides who gets in. Anyone reaching the hub has already been checked by
+      # Google against roles/iap.httpsResourceAccessor, so a second allowlist here would
+      # only reject people IAP just admitted. Without this, JupyterHub authenticates the
+      # user and then refuses them, which reads as a broken login rather than a policy.
+      #
+      # Restrict membership on the IAP binding, not here. For a course that means a
+      # group: gcloud projects add-iam-policy-binding PROJECT \
+      #   --member=group:students@your-university.edu \
+      #   --role=roles/iap.httpsResourceAccessor
+      allow_all: true
+  # Trust the identity IAP already verified, instead of asking the user again.
+  #
+  # IAP authenticates at the load balancer and forwards the result as a header:
+  #
+  #   X-Goog-Authenticated-User-Email: accounts.google.com:someone@example.com
+  #
+  # The header is only trustworthy because traffic cannot reach the pods except through
+  # the GFE. That is enforced by the firewall, which allows 130.211.0.0/22 and
+  # 35.191.0.0/16 and nothing else. Expose this Service any other way and the header
+  # becomes forgeable, so do not pair this authenticator with a plain LoadBalancer.
+  #
+  # For production, verify the signed JWT in X-Goog-IAP-JWT-Assertion rather than
+  # trusting the email header. The header is sufficient here because the only path in
+  # is the IAP-protected one.
+  extraConfig:
+    iap-auth: |
+      from jupyterhub.auth import Authenticator
+      from jupyterhub.handlers.login import LoginHandler
+      from jupyterhub.utils import url_path_join
+      from tornado import web
+
+      IAP_HEADER = "X-Goog-Authenticated-User-Email"
+
+      class IAPLoginHandler(LoginHandler):
+          async def get(self):
+              raw = self.request.headers.get(IAP_HEADER, "")
+              if not raw:
+                  raise web.HTTPError(
+                      401,
+                      "No IAP header. You reached the hub without going through IAP.",
+                  )
+              # "accounts.google.com:someone@example.com" -> "someone@example.com"
+              email = raw.split(":", 1)[-1].strip().lower()
+              # Keep the local part so pod names stay readable. Safe while every user
+              # comes from one domain; add the domain back if that stops being true.
+              username = email.split("@")[0]
+              user = await self.auth_to_user({"name": username})
+              self.set_login_cookie(user)
+              self.redirect(url_path_join(self.hub.server.base_url, "spawn"))
+
+      class IAPAuthenticator(Authenticator):
+          # No login form. The user already signed in at the load balancer.
+          auto_login = True
+
+          def get_handlers(self, app):
+              return [(r"/login", IAPLoginHandler)]
+
+          async def authenticate(self, handler, data=None):
+              return None
+
+      c.JupyterHub.authenticator_class = IAPAuthenticator
   # Autopilot rejects privileged pods and enforces Pod Security Standards. Give the
   # hub an explicit non-root context rather than letting the chart's default get
   # rewritten by the Autopilot mutating webhook.
@@ -34,15 +92,30 @@ hub:
     runAsUser: 1000
     runAsGroup: 1000
     allowPrivilegeEscalation: false
+  # Autopilot consolidates nodes freely, and it moved the hub and proxy twice during a
+  # single afternoon of TPU node churn. Each move killed the port-forward. A PDB does not
+  # make eviction impossible on a single replica, but it stops routine consolidation.
+  pdb:
+    enabled: true
+    minAvailable: 1
 
 proxy:
   service:
-    type: LoadBalancer
+    # ClusterIP, not LoadBalancer. An L4 LB can never get an address in this org, so it
+    # retried and failed on a loop. The Ingress in k8s/ingress-iap.yaml fronts this
+    # Service instead, and GKE builds NEGs pointing straight at the pods.
+    type: ClusterIP
+    annotations:
+      cloud.google.com/neg: '{"ingress": true}'
+      cloud.google.com/backend-config: '{"default": "hub-iap"}'
   chp:
     resources:
       requests:
         cpu: 200m
         memory: 512Mi
+    pdb:
+      enabled: true
+      minAvailable: 1
 
 # Both of these are off for Autopilot.
 #   userScheduler packs users onto the fewest nodes so the rest can scale down. On
@@ -75,8 +148,8 @@ cull:
 
 singleuser:
   # z2jh ships a `block-cloud-metadata` initContainer that runs privileged with
-  # NET_ADMIN. It installs an iptables rule against 169.254.169.254. Autopilot rejects
-  # the container:
+  # NET_ADMIN and installs an iptables rule against 169.254.169.254. Autopilot rejects
+  # it outright:
   #
   #   denied by autogke-disallow-privilege: container block-cloud-metadata is privileged
   #   denied by autogke-default-linux-capabilities: capability 'NET_ADMIN' not allowed
@@ -84,36 +157,45 @@ singleuser:
   # The spawn fails with a 400 from the GKE Warden webhook and the pod never appears,
   # so this is the first thing that breaks z2jh on Autopilot.
   #
-  # Turning it off is safe HERE and not in general. This cluster runs Workload Identity
-  # with workloadMetadataConfig mode GKE_METADATA, so the GKE Metadata Server already
-  # stands between the pod and the node service account. That is what the iptables rule
-  # protects. Confirm this before you copy the line to another cluster:
+  # Turning it off is the DOCUMENTED answer here, not a workaround. z2jh blocks the
+  # metadata endpoint two ways and only needs one. The second way is the singleuser
+  # NetworkPolicy, which already denies 169.254.169.254, and the z2jh security guide
+  # says to prefer that and set blockWithIptables to false whenever a NetworkPolicy
+  # controller is present. GKE Dataplane V2 is Cilium, so one is present.
+  #   https://z2jh.jupyter.org/en/stable/administrator/security.html
   #
-  #   gcloud container clusters describe CLUSTER --format="value(workloadIdentityConfig.workloadPool)"
+  # Two conditions must hold before you copy this line elsewhere:
+  #   1. A NetworkPolicy controller enforces policy. Without one the cluster silently
+  #      ignores the rules and nothing blocks the metadata server at all.
+  #   2. networkPolicy.enabled stays true and egressAllowRules.cloudMetadataServer
+  #      stays false, below. Since chart 3.0.0 setting blockWithIptables AND
+  #      cloudMetadataServer both true is rejected as ambiguous.
+  #
+  # This cluster also runs Workload Identity in GKE_METADATA mode, which puts the GKE
+  # Metadata Server between the pod and the node service account. That is defence in
+  # depth, not the reason this is safe.
   cloudMetadata:
     blockWithIptables: false
 
   # z2jh puts a NetworkPolicy on singleuser pods that denies egress to private IP
-  # ranges. This is a good default, but it stops this design. submit_tpu.py contacts the
-  # Kubernetes API server to create its Job, and that server has a private address.
+  # ranges. That is a good default and it breaks this design, because submit_tpu.py
+  # talks to the Kubernetes API server to create its Job and the API server sits on a
+  # private address. The symptom is a bare connect timeout to the API ClusterIP, with
+  # nothing in the hub log, because the packet is dropped rather than refused.
   #
-  # The symptom is a connection timeout to the API ClusterIP. The hub log shows nothing,
-  # because the network drops the packet and does not refuse it.
-  #
-  # Permit the API server only. Do not set privateIPs: true. That setting lets student
-  # code contact each other pod and node in the cluster. This includes the notebooks of
-  # other students.
+  # Open exactly the API server and nothing else. Do NOT reach for privateIPs: true --
+  # that would let student code talk to every other pod and node in the cluster,
+  # including other students' notebooks.
   #
   # Allow the API server's REAL ENDPOINT, not its ClusterIP. This is the part that
   # costs an hour if you get it wrong.
   #
   # GKE Dataplane V2 (Cilium) evaluates egress policy AFTER the Service DNAT. A rule
-  # that permits the `kubernetes` ClusterIP therefore never matches. Policy runs after
-  # the destination becomes the private endpoint of the control plane. That endpoint is
-  # inside the 10.0.0.0/8 range, which the z2jh rule excludes.
-  #
-  # The network drops the packet. The client reports a connection timeout to the
-  # ClusterIP, which is not the address that policy examined.
+  # permitting the `kubernetes` ClusterIP 34.118.224.1 therefore never matches: by the
+  # time policy runs, the destination has already been rewritten to the master's
+  # private endpoint, which lands inside the 10.0.0.0/8 block that z2jh's catch-all
+  # rule explicitly excepts. The packet is dropped and the client sees a bare connect
+  # timeout to the ClusterIP, which points at the wrong address entirely.
   #
   # Get the endpoint, not the Service IP:
   #   kubectl get endpoints kubernetes -n default -o jsonpath='{.subsets[0].addresses[0].ip}'
@@ -145,25 +227,24 @@ singleuser:
     KUEUE_LOCAL_QUEUE: "tpu"
     # submit_tpu.py is mounted here rather than into /home/jovyan, because the home
     # directory is a PVC and a ConfigMap mount would fight it.
-    PYTHONPATH: "/opt/course"
+    PYTHONPATH: "/opt/cmu"
   # 03_deploy_hub.sh fills stringData from notebooks/submit_tpu.py with helm
   # --set-file, so the helper stays one real file instead of a copy pasted into YAML.
   extraFiles:
     submit_tpu.py:
-      mountPath: /opt/course/submit_tpu.py
+      mountPath: /opt/cmu/submit_tpu.py
       stringData: "placeholder, replaced at deploy time"
     hw0_tpu_hello.ipynb:
-      mountPath: /opt/course/hw0_tpu_hello.ipynb
+      mountPath: /opt/cmu/hw0_tpu_hello.ipynb
       stringData: "placeholder, replaced at deploy time"
 
     # ONLY NEEDED WHEN REACHING THE HUB THROUGH kubectl port-forward.
     #
     # Jupyter Server compares the browser's Origin header against its own Host. A
-    # port-forward makes the two different. The browser sends the real hostname. The
-    # server uses localhost:8899.
-    #
-    # Each API call and websocket is refused. The kernel does not connect. A cell stays
-    # at [*], and the student sees no error. The only record is in the notebook pod log:
+    # port-forward breaks that comparison: the browser sends the real hostname while
+    # the server believes it is localhost:8899. Every API call and websocket is
+    # refused, so the kernel never connects and a cell sits on [*] forever with no
+    # error anywhere the student can see. The only trace is in the notebook pod log:
     #
     #   Blocking Cross Origin API request for /user/NAME/api/events/subscribe.
     #   Origin: https://..., Host: localhost:8899
@@ -184,9 +265,9 @@ singleuser:
   #    submit_tpu.py needs one. Bake this into a course image for a real term.
   #
   # 2. Copy the assignment into the student's home directory. extraFiles mounts are
-  #    read-only ConfigMap volumes. The notebook therefore cannot go in /home/jovyan.
-  #    The home directory is a PVC, and the two mounts conflict. Mount the file under
-  #    /opt/course and copy it at the first spawn.
+  #    read-only ConfigMap volumes, so the notebook cannot live in /home/jovyan
+  #    directly -- the home directory is a PVC and the two would fight. Mount it under
+  #    /opt/cmu and copy on first spawn instead.
   #
   #    `cp -n` matters: without it, every restart would overwrite the student's work
   #    with the blank assignment.
@@ -197,14 +278,14 @@ singleuser:
           - "sh"
           - "-c"
           - "pip install --quiet kubernetes >/dev/null 2>&1 || true;
-             cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
+             cp -n /opt/cmu/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
   defaultUrl: "/lab"
   image:
     name: quay.io/jupyter/scipy-notebook
     tag: "2024-11-11"
 
   profileList:
-    - display_name: "Course default, CPU notebook"
+    - display_name: "Course default — CPU notebook"
       description: >-
         4 vCPU, 16 GB. Where you write and debug. Run TPU work from here with
         submit_tpu.run(); the chip is attached only while your job runs.

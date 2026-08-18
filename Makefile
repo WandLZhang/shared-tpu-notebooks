@@ -6,6 +6,9 @@
 #   make cluster     PROJECT=my-project      # ~12 min
 #   make hub         PROJECT=my-project
 #   make demo        PROJECT=my-project      # cluster + hub + one real TPU job
+#   make iap         PROJECT=my-project      # HTTPS + Google sign-in, once
+#   make warm-on     PROJECT=my-project      # hold WARM chips ready (default 1)
+#   make warm-off    PROJECT=my-project
 #   make scale       PROJECT=my-project      # 100 students through 32 chips
 #   make teardown    PROJECT=my-project
 
@@ -13,9 +16,10 @@ PROJECT ?=
 REGION  ?= us-west4
 CLUSTER ?= tpu-notebooks
 NS      ?= class-sec-a
+WARM    ?= 1
 export PROJECT REGION CLUSTER
 
-.PHONY: check preflight cluster hub demo smoke scale report teardown venv
+.PHONY: check preflight cluster hub iap warm-on warm-off demo smoke scale report teardown venv
 
 check:
 ifndef PROJECT
@@ -40,10 +44,22 @@ smoke: check
 	kubectl -n $(NS) logs -l job-name=smoke-000 --tail=-1
 	kubectl -n $(NS) delete job smoke-000
 
+# HTTPS + Google sign-in via Identity-Aware Proxy. Run once per cluster. Replaces
+# port-forwarding, which binds to a single proxy pod and dies when that pod moves.
+iap: check
+	bash scripts/08_setup_iap.sh
+
+# Hold warm TPU nodes so the first job of the day skips the 2-4 min node build.
+# Warm chips bill continuously, so turn them off when you are done.
+warm-on: check
+	bash scripts/07_warm_pool.sh on $(WARM)
+
+warm-off: check
+	bash scripts/07_warm_pool.sh off
+
 demo: cluster hub smoke
 	@echo
-	@echo "Reach the hub:  kubectl -n $(NS) port-forward service/proxy-public 8899:http"
-	@echo "Then open http://localhost:8899 and log in with any username."
+	@echo "Put the hub behind HTTPS and Google sign-in:  make iap PROJECT=$(PROJECT)"
 
 venv:
 	python3 -m venv .venv && ./.venv/bin/pip install --quiet --upgrade pip

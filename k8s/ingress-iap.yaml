@@ -1,0 +1,80 @@
+# HTTPS ingress with Identity-Aware Proxy in front of JupyterHub.
+#
+# This replaces `kubectl port-forward`, which bound to a single proxy pod and died every
+# time that pod was rescheduled -- twice mid-demo on 2026-08-18.
+#
+# WHY AN L7 INGRESS WORKS HERE WHEN THE L4 LOAD BALANCER DID NOT
+#
+# A Service of type LoadBalancer defaults spec.loadBalancerSourceRanges to 0.0.0.0/0, and
+# some orgs forbid firewall rules that broad. Ours does, so proxy-public never got an
+# address and retried forever:
+#
+#   Error 412: Operation denied by org policy: Firewall rules must be more specific
+#   than 0.0.0.0/0
+#
+# A GKE Ingress never creates that rule. Google Front Ends terminate the connection and
+# proxy to the pods, so the only firewall openings needed are the GFE and health-check
+# ranges 130.211.0.0/22 and 35.191.0.0/16. Both are more specific than 0.0.0.0/0, so the
+# constraint doesn't apply.
+#
+# NO OAUTH CLIENT TO CREATE
+#
+# The IAP OAuth Admin APIs shut down in March 2026. Since GKE 1.29.4-gke.1043000, leaving
+# oauthclientCredentials out of the BackendConfig gets you a Google-managed OAuth client.
+# It's org-internal only, which is what a university wants. Adding a secretName here would
+# opt back into the old path.
+#
+# Placeholders filled by scripts/08_setup_iap.sh:
+#   __DOMAIN__      <static-ip>.nip.io
+#   __NAMESPACE__   the hub namespace
+---
+apiVersion: cloud.google.com/v1
+kind: BackendConfig
+metadata:
+  name: hub-iap
+  namespace: __NAMESPACE__
+spec:
+  iap:
+    enabled: true
+  # The GFE health check defaults to "/" on the backend. JupyterHub answers 302 there,
+  # which the load balancer treats as unhealthy, so the backend never comes up and the
+  # Ingress serves 502 forever. Point it at the hub's own health endpoint instead.
+  healthCheck:
+    type: HTTP
+    requestPath: /hub/health
+    port: 8000
+    checkIntervalSec: 15
+    timeoutSec: 5
+    healthyThreshold: 1
+    unhealthyThreshold: 3
+  # A notebook websocket that idles longer than this gets cut. 3600s matches the z2jh
+  # idle culler, so the LB never times out a session the hub still considers alive.
+  timeoutSec: 3600
+---
+apiVersion: networking.gke.io/v1
+kind: ManagedCertificate
+metadata:
+  name: hub-cert
+  namespace: __NAMESPACE__
+spec:
+  domains:
+    - __DOMAIN__
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hub-ingress
+  namespace: __NAMESPACE__
+  annotations:
+    kubernetes.io/ingress.class: "gce"
+    kubernetes.io/ingress.global-static-ip-name: tpu-notebooks-ip
+    networking.gke.io/managed-certificates: hub-cert
+    # IAP needs HTTPS. Leave HTTP enabled so the managed certificate can complete its
+    # HTTP-01 style validation; once the cert is ACTIVE you can set this to "true".
+    kubernetes.io/ingress.allow-http: "true"
+spec:
+  defaultBackend:
+    service:
+      name: proxy-public
+      port:
+        number: 80

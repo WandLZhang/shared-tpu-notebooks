@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Install JupyterHub and give student notebooks permission to submit TPU Jobs.
 #
-# The RBAC below is the security boundary. A student notebook can create, watch and
-# delete Jobs in its own namespace. It can also read the logs of those Jobs.
-#
-# The notebook cannot use a different namespace. It cannot edit the ClusterQueue that
-# limits the pool. Student code is not trusted. Configure it in this way.
+# The RBAC below is the security boundary of the classroom. A student notebook can
+# create, watch and delete Jobs in its own namespace and read their logs. It cannot
+# touch another namespace, cannot create a Job with a node selector of its choosing
+# outside what the pod template allows, and cannot edit the ClusterQueue that caps
+# the pool. Student code is untrusted; treat it that way.
 set -euo pipefail
 
-PROJECT="${PROJECT:?set PROJECT to your GCP project id}"
+PROJECT="${PROJECT:-${PROJECT:?set PROJECT to your GCP project id}}"
 REGION="${REGION:-us-west4}"
 CLUSTER="${CLUSTER:-tpu-notebooks}"
 NAMESPACE="${NAMESPACE:-class-sec-a}"
@@ -90,21 +90,22 @@ helm upgrade --install "${RELEASE}" jupyterhub/jupyterhub \
   --wait
 
 echo
-echo "==> waiting for the proxy LoadBalancer address"
-for i in $(seq 1 60); do
-  IP=$(kubectl -n "${NAMESPACE}" get svc proxy-public \
-        -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
-  [[ -n "${IP}" ]] && break
-  sleep 10
-done
-
-echo
 kubectl -n "${NAMESPACE}" get pods
 echo
-if [[ -n "${IP:-}" ]]; then
-  echo "hub: http://${IP}"
-  echo "auth is the dummy authenticator -- any username, no password. Swap for"
-  echo "GoogleOAuthenticator against your institution domain before real students touch it."
+
+# proxy-public is a ClusterIP now, so there is no external address to wait for. The
+# earlier version of this script polled for a LoadBalancer IP for ten minutes on every
+# deploy, and in this org that IP never arrives: an L4 load balancer defaults its source
+# range to 0.0.0.0/0, which the org policy forbids.
+#
+# The hub is reached through the Ingress instead. Run 08_setup_iap.sh once per cluster.
+if kubectl -n "${NAMESPACE}" get ingress hub-ingress >/dev/null 2>&1; then
+  DOMAIN=$(kubectl -n "${NAMESPACE}" get managedcertificate hub-cert \
+             -o jsonpath='{.spec.domains[0]}' 2>/dev/null || true)
+  STATUS=$(kubectl -n "${NAMESPACE}" get managedcertificate hub-cert \
+             -o jsonpath='{.status.certificateStatus}' 2>/dev/null || true)
+  echo "hub: https://${DOMAIN}   (certificate: ${STATUS:-unknown})"
 else
-  echo "no external IP yet; kubectl -n ${NAMESPACE} get svc proxy-public -w"
+  echo "No ingress yet. Put the hub behind HTTPS and Google sign-in with:"
+  echo "  bash $(dirname "$0")/08_setup_iap.sh"
 fi
