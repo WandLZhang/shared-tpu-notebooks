@@ -163,6 +163,12 @@ and the packing, and overstates the ceiling by double.
 Concurrent chips are not the same as class size. The 300 students in the measured run
 used 64 chips, because each student held a chip only while a job ran.
 
+Every limit here is per region, so a stockout stalls the class. If that happens,
+[MultiKueue](https://github.com/cloud-gtm/gke-multiregion-demo) spans the queue across
+clusters in several regions and spills jobs to whichever has free chips, at the cost of a
+manager cluster and per-worker RBAC, and only for jobs that read from GCS rather than local
+notebook state.
+
 ## Scaling to 500 students
 
 Only one thing blocks 500, and it is not the TPUs.
