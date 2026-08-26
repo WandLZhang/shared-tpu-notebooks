@@ -237,15 +237,15 @@ singleuser:
     KUEUE_LOCAL_QUEUE: "tpu"
     # submit_tpu.py is mounted here rather than into /home/jovyan, because the home
     # directory is a PVC and a ConfigMap mount would fight it.
-    PYTHONPATH: "/opt/cmu"
+    PYTHONPATH: "/opt/course"
   # 03_deploy_hub.sh fills stringData from notebooks/submit_tpu.py with helm
   # --set-file, so the helper stays one real file instead of a copy pasted into YAML.
   extraFiles:
     submit_tpu.py:
-      mountPath: /opt/cmu/submit_tpu.py
+      mountPath: /opt/course/submit_tpu.py
       stringData: "placeholder, replaced at deploy time"
     hw0_tpu_hello.ipynb:
-      mountPath: /opt/cmu/hw0_tpu_hello.ipynb
+      mountPath: /opt/course/hw0_tpu_hello.ipynb
       stringData: "placeholder, replaced at deploy time"
 
     # ONLY NEEDED WHEN REACHING THE HUB THROUGH kubectl port-forward.
@@ -277,7 +277,7 @@ singleuser:
   # 2. Copy the assignment into the student's home directory. extraFiles mounts are
   #    read-only ConfigMap volumes, so the notebook cannot live in /home/jovyan
   #    directly -- the home directory is a PVC and the two would fight. Mount it under
-  #    /opt/cmu and copy on first spawn instead.
+  #    /opt/course and copy on first spawn instead.
   #
   #    `cp -n` matters: without it, every restart would overwrite the student's work
   #    with the blank assignment.
@@ -288,7 +288,7 @@ singleuser:
           - "sh"
           - "-c"
           - "pip install --quiet kubernetes >/dev/null 2>&1 || true;
-             cp -n /opt/cmu/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
+             cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
   defaultUrl: "/lab"
   image:
     name: quay.io/jupyter/scipy-notebook

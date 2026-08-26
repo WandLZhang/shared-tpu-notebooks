@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
-# Find a zone that will actually give you a v5e chip, before a class of 300 finds out
-# for you.
+# v5e sibling of ai-infra-demo-2026-05/capacity/flex_spray_tpu.sh.
 #
-# The cluster does not need this script. Two failures look the same from inside GKE.
-# In the first, the zone has no capacity at this moment. In the second, the zone can
-# never supply what you request. A real submit separates them in seconds.
+# WHY THIS EXISTS RATHER THAN CALLING THAT SCRIPT
 #
-# DWS Flex exists in only a few zones for each accelerator. The public documentation
-# has been wrong in both directions. A zone with no flex pool rejects at once:
+# flex_spray_tpu.sh guards its flex zone list only when ACCEL=v6e-*:
 #
-#     FLEX_START provisioning model is not supported for accelerator type
-#     "v5litepod-1" in location "..."
+#     if [[ "$MODE" == "flex" && "$ACCEL" == v6e-* ]]; then ZONES="${V6E_FLEX_ZONES}"
 #
-# This is error code 3. A retry never corrects it.
+# A v5e flex run falls through to zone discovery, which returns every zone that
+# offers v5e at all -- about 20 -- against a feature that exists in two. That is the
+# same waste the v6e guard was written to prevent, just on a different chip.
 #
-# A loop that uses twenty zones against a two-zone feature wastes most of its attempts.
-# The result looks the same as a capacity shortage. The V5E_FLEX_ZONES guard below
-# rejects a zone with no flex pool, and it gives the reason.
+# The v5e flex zone list, MEASURED by submitting a real FLEX_START request into each
+# candidate on 2026-08-25. Only one zone accepted:
 #
-# Discover your own flex zones by running MODE=flex against a wide ZONES list once and
-# keeping whichever ones do not return code 3. Then set V5E_FLEX_ZONES.
+#     us-west4-a        accepted
+#     us-central1-a     rejected, code 3, no flex pool
+#     us-central1-b/c   v5e not offered at all, 0 accelerator types
+#     europe-west4-b    rejected, code 3, no flex pool
+#
+# An earlier version of this file listed europe-west4-b as a flex zone, taken from the
+# DWS Flex Dedicated table on an internal capacity dashboard, which showed 4/256 chips there. A
+# real submit says otherwise. The dashboard reports pool SIZE, not whether your project
+# can draw from it, and this is the second time that distinction has cost us -- the same
+# trap produced a phantom 15,548-chip v6e pool in us-west1-c.
+#
+# Derive this list by submitting, not by reading a table. A rejection is instant and
+# free, so the measurement costs nothing.
+#
+# us-central1 having no v5e flex pool is why a class running there waits on on-demand
+# capacity and sees 20-minute cold starts.
 #
 #   MODE=flex     bash 01_spray_v5e.sh            # $0 while queued
 #   MODE=ondemand ACCEL=v5litepod-1 bash 01_spray_v5e.sh
 #   MODE=spot     ZONES="us-west4-a" bash 01_spray_v5e.sh
 set -uo pipefail
 
-PROJECT="${PROJECT:?set PROJECT to your GCP project id}"
+PROJECT="${PROJECT:-${PROJECT:?set PROJECT to your GCP project id}}"
 ACCEL="${ACCEL:-v5litepod-1}"
 RUNTIME="${RUNTIME:-v2-alpha-tpuv5-lite}"
 TAG="${TAG:-tpuspray}"
@@ -35,11 +45,11 @@ MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-1800}"
 MAX_RUN_DURATION="${MAX_RUN_DURATION:-604800s}"
 MODE="${MODE:-flex}"
 
-# Source: measured by real submits. Confirmed 2026-08-13.
-V5E_FLEX_ZONES="${V5E_FLEX_ZONES:-us-west4-a europe-west4-b}"
+# Measured by submitting, 2026-08-25. See the header. Re-measure before trusting it.
+V5E_FLEX_ZONES="${V5E_FLEX_ZONES:-us-west4-a}"
 
 # On-demand and Spot are not restricted to the flex pools, so they get the wider
-# list. Set these to zones your project can actually reach.
+# list. These are the zones the dashboard shows carrying v5e single-host inventory.
 V5E_WIDE_ZONES="${V5E_WIDE_ZONES:-us-west4-a us-central1-a us-south1-a europe-west4-b europe-west4-a us-east5-a}"
 
 case "$MODE" in
@@ -59,8 +69,8 @@ if [[ -z "${ZONES:-}" ]]; then
   fi
 fi
 
-# A flex submit into a zone with no flex pool always returns code 3. A retry loop
-# repeats this without a limit. Stop it here.
+# Same loud guard as the v6e script: submitting flex into a zone with no flex pool
+# can only ever return code 3, and a retry loop will do it forever.
 if [[ "$MODE" == "flex" ]]; then
   overlap=""
   for z in ${ZONES}; do

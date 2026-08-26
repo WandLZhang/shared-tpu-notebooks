@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Preflight for the shared TPU notebook cluster. Read-only: nothing here costs money.
+# Preflight for a university TPU classroom. Read-only: nothing here costs money.
 #
 # Answers, per region, the three questions that gate a v5e classroom before
 # capacity is ever in play:
@@ -18,7 +18,7 @@
 # Asking support to raise Device quota when you needed PodSlice is a wasted round trip.
 set -uo pipefail
 
-PROJECT="${PROJECT:?set PROJECT to your GCP project id}"
+PROJECT="${PROJECT:-${PROJECT:?set PROJECT to your GCP project id}}"
 REGIONS="${REGIONS:-us-west4 us-central1 europe-west4 us-south1 us-east5 us-west1}"
 
 echo "project: ${PROJECT}"
@@ -54,9 +54,22 @@ done
 echo
 echo "PODSLICE is the column that matters. DEVICE being 0 is normal and harmless."
 echo
-echo "A region needs a non-zero PODSLICE limit and at least one zone offering"
-echo "v5litepod types. Both true means you can build the cluster there."
+echo "=== v5e DWS Flex zones, measured by submitting (2026-08-25) ==="
+echo "  us-west4-a       accepted"
+echo "  us-central1-a    rejected, code 3, no flex pool"
+echo "  us-central1-b/c  v5e not offered at all"
+echo "  europe-west4-b   rejected, code 3, no flex pool"
 echo
-echo "Quota is a ceiling, not a promise. It says how many chips you are allowed to"
-echo "hold, never how many the zone can hand you right now. Only a real submit"
-echo "answers that, which is what 01_spray_v5e.sh is for."
+echo "Only us-west4-a served v5e flex. An earlier version of this script listed"
+echo "europe-west4-b too, read off a capacity dashboard showing 4/256 chips there."
+echo "A real submit disagreed. The dashboard reports pool SIZE, not whether your"
+echo "project can draw from it."
+echo
+echo "This matters for cold starts. Where there is no flex pool, the v5e-flex"
+echo "ResourceFlavor can never place, half the queue quota is unusable, and every"
+echo "job waits on on-demand capacity instead."
+echo
+echo "Re-measure rather than trusting this list. A rejection is instant and free:"
+echo "  gcloud alpha compute tpus queued-resources create probe --node-id=probe \\"
+echo "    --zone=ZONE --accelerator-type=v5litepod-1 --runtime-version=v2-alpha-tpuv5-lite \\"
+echo "    --provisioning-model=FLEX_START --max-run-duration=3600s"

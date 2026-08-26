@@ -25,12 +25,26 @@ import os
 import time
 import uuid
 
-from kubernetes import client, config, watch
+from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
 
 TPU_IMAGE = os.environ.get(
     "TPU_IMAGE", "us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest"
 )
 QUEUE = os.environ.get("KUEUE_LOCAL_QUEUE", "tpu")
+
+
+class JobInterrupted(RuntimeError):
+    """The job went away before it could run. Nothing executed; re-running is safe."""
+
+
+def _delete(batch: "client.BatchV1Api", name: str, ns: str) -> None:
+    """Delete a Job, tolerating the case where it is already gone."""
+    try:
+        batch.delete_namespaced_job(name, ns, propagation_policy="Background")
+    except ApiException as e:
+        if e.status != 404:
+            raise
 
 
 def _namespace() -> str:
@@ -115,32 +129,50 @@ def run(code: str, timeout: int = 1800, keep: bool = False) -> str:
 
     t0 = time.time()
     admitted_at = None
-    pod_name = None
 
-    while time.time() - t0 < timeout:
-        j = batch.read_namespaced_job(name, ns)
-        if admitted_at is None and not j.spec.suspend:
-            admitted_at = time.time()
-            print(f"  admitted after {admitted_at - t0:.0f}s in queue", flush=True)
+    try:
+        while time.time() - t0 < timeout:
+            try:
+                j = batch.read_namespaced_job(name, ns)
+            except ApiException as e:
+                # Someone deleted the job while we were waiting: a TA clearing a stuck
+                # queue, a TTL sweep, a kubectl delete. That is an interruption, not a
+                # failure of the student's code, so say so plainly instead of letting a
+                # raw 404 traceback end the cell.
+                if e.status == 404:
+                    raise JobInterrupted(
+                        f"{name} was deleted while waiting for a chip. Nothing ran. "
+                        f"Re-run the cell to submit again."
+                    ) from None
+                raise
 
-        pods = core.list_namespaced_pod(ns, label_selector=f"job-name={name}").items
-        if pods:
-            pod_name = pods[0].metadata.name
-            phase = pods[0].status.phase
-            if phase in ("Succeeded", "Failed"):
-                out = core.read_namespaced_pod_log(pod_name, ns)
-                total = time.time() - t0
-                print(f"  {phase} after {total:.0f}s total", flush=True)
-                if not keep:
-                    batch.delete_namespaced_job(
-                        name, ns, propagation_policy="Background"
-                    )
-                if phase == "Failed":
-                    raise RuntimeError(f"job failed:\n{out}")
-                return out
-        time.sleep(5)
+            if admitted_at is None and not j.spec.suspend:
+                admitted_at = time.time()
+                print(f"  admitted after {admitted_at - t0:.0f}s in queue", flush=True)
 
-    batch.delete_namespaced_job(name, ns, propagation_policy="Background")
+            pods = core.list_namespaced_pod(
+                ns, label_selector=f"job-name={name}"
+            ).items
+            if pods:
+                phase = pods[0].status.phase
+                if phase in ("Succeeded", "Failed"):
+                    out = core.read_namespaced_pod_log(pods[0].metadata.name, ns)
+                    print(f"  {phase} after {time.time() - t0:.0f}s total", flush=True)
+                    if not keep:
+                        _delete(batch, name, ns)
+                    if phase == "Failed":
+                        raise RuntimeError(f"job failed:\n{out}")
+                    return out
+            time.sleep(5)
+
+    except KeyboardInterrupt:
+        # Ctrl-C stops the poller, not the job. Without this the Job keeps its place in
+        # the queue and can still take a chip with nobody watching for the result.
+        print(f"  interrupted; deleting {name}", flush=True)
+        _delete(batch, name, ns)
+        raise
+
+    _delete(batch, name, ns)
     raise TimeoutError(
         f"{name} did not finish within {timeout}s. The pool is busy or the zone is "
         f"out of v5e. Check: kubectl get workloads -n {ns}"

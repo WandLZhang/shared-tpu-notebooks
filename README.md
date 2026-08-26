@@ -87,6 +87,37 @@ Do not rely on a node being left warm. Autopilot removes an idle TPU node about 
 minutes after a job ends, and `submit_tpu.run()` deletes the Job as soon as it returns,
 which empties the node right away. Scale-to-zero works against you here.
 
+**Check your region before you blame the warm pool.** The repo ships two Kueue
+ResourceFlavors, `v5e-ondemand` and `v5e-flex`. The flex one only places on nodes labeled
+`cloud.google.com/gke-flex-start: "true"`, which exist only where that zone has a v5e DWS
+Flex pool. Measured on 2026-08-25 by submitting a real `FLEX_START` request:
+
+| zone | result |
+|---|---|
+| **us-west4-a** | **accepted** |
+| us-central1-a | rejected, code 3, no flex pool |
+| us-central1-b / -c | v5e not offered at all |
+| europe-west4-b | rejected, code 3, no flex pool |
+
+Where no flex pool exists, half of each section's quota can never be satisfied and every
+job falls through to on-demand. A user running in us-central1 saw 20-minute cold starts
+for that reason. Confirm it in one command during a run:
+
+```bash
+kubectl get nodes -l cloud.google.com/gke-flex-start=true
+```
+
+Always empty means the flex flavor is dead weight. Either move region, or set the
+`v5e-flex` `nominalQuota` to 0 so Kueue stops reserving quota it cannot place.
+
+Measure this yourself rather than reading a capacity dashboard. A dashboard reports pool
+size, not whether your project can draw from it, and a rejection is instant and free.
+
+**For a scheduled lab, a warm pool is the wrong instrument.** It suits homework, where
+demand arrives unpredictably. A lab that starts at a fixed hour with everyone running at
+once wants a reservation or a DWS Calendar booking. GKE also cancels TPU scale-ups that
+wait more than 10 hours, so a timetabled class should not depend on on-demand.
+
 `make warm-on` holds placeholder pods on TPU nodes instead. A student job outranks a
 placeholder, so the scheduler evicts one and the student lands on a node that already
 runs. The Deployment then warms a replacement node. See `k8s/tpu-warm-pool.yaml` for the

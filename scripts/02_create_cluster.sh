@@ -2,21 +2,19 @@
 # Stand up the classroom substrate: Autopilot cluster, Kueue, section queues.
 # Idempotent -- safe to re-run.
 #
-# This script uses Autopilot and not Standard. Autopilot builds one ct5lp-hightpu-1t
-# node for each TPU pod. It reads the two nodeSelector labels to do this. It removes
-# the node when the pod ends.
+# Autopilot, not Standard, on purpose. Autopilot provisions a ct5lp-hightpu-1t node
+# per TPU pod from the two nodeSelector labels and scales back to zero when the pod
+# ends. Standard would need a node pool per topology plus the cluster autoscaler, and
+# ai-infra-demo-2026-05/capacity/README.md:127 records why that is worse on tight
+# supply: a Standard node pool asks Compute for all its nodes in ONE atomic resize
+# and hard-fails on GCE_STOCKOUT, while the queued path waits for a window.
 #
-# Standard needs one node pool for each topology and the cluster autoscaler. A Standard
-# node pool also requests all of its nodes in one atomic resize. If the zone cannot
-# supply all of them at that moment, the resize fails with GCE_STOCKOUT. A queued
-# request waits for capacity instead.
-#
-# Autopilot bills a TPU pod by the node. You pay for all 24 vCPU and 48 GiB while the
-# pod runs. For this reason, student TPU work must be a short Job and not a notebook
-# that stays open.
+# The trade Autopilot makes is billing. A TPU pod is node-billed, so you pay for the
+# whole 24 vCPU / 48 GiB node for as long as the pod lives. That is why student TPU
+# work is a short Job and not a long-lived notebook.
 set -euo pipefail
 
-PROJECT="${PROJECT:?set PROJECT to your GCP project id}"
+PROJECT="${PROJECT:-${PROJECT:?set PROJECT to your GCP project id}}"
 REGION="${REGION:-us-west4}"
 CLUSTER="${CLUSTER:-tpu-notebooks}"
 KUEUE_VERSION="${KUEUE_VERSION:-v0.19.1}"
@@ -52,22 +50,25 @@ for i in $(seq 1 60); do
   sleep 5
 done
 
+# Priority classes must exist before the hub is installed. 03_deploy_hub.sh references
+# jupyterhub-core and student-notebook, and Kubernetes rejects a pod whose
+# priorityClassName does not resolve. Applying these by hand during development and
+# forgetting to wire them in here is what broke `make hub` for a user.
+echo "==> priority classes"
+kubectl apply -f "$(dirname "$0")/../k8s/priority-classes.yaml"
+
 echo "==> resource flavors"
 kubectl apply -f "$(dirname "$0")/../k8s/kueue-tpu-queues.yaml"
 
 # Split the pool evenly across sections. Each section is guaranteed its share and
 # borrows the rest from the cohort when the other sections are idle.
 #
-# Divide by the sections and also by the flavors. Kueue quota applies to each pair of
-# flavor and resource. The flavors then add together into the capacity of the
-# ClusterQueue.
-#
-# A second flavor does not make an overflow inside the budget of the first flavor. It
-# adds a second budget.
-#
-# This error is silent. The first version of this script requested a pool of 32 chips.
-# It used 4 sections, 8 chips, and 2 flavors, and it admitted 64 workloads together.
-# No error occurs. You buy two times the chips that you planned.
+# Divide by sections AND by flavors. Kueue quota is per (flavor, resource) and the
+# flavors SUM into the ClusterQueue's capacity -- listing a second flavor does not
+# create an overflow lane inside the first one's budget, it adds a second budget.
+# Getting this wrong is silent: the first run of this script asked for a 32-chip pool
+# with 4 sections x 8 chips x 2 flavors and admitted 64 workloads at once. Nothing
+# errors, you simply buy twice the chips you planned for.
 NSEC=$(echo "${SECTIONS}" | wc -w)
 NFLAVORS=2
 PER=$(( POOL_CHIPS / NSEC / NFLAVORS ))
