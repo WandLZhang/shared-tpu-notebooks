@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import os
 import time
-import uuid
 
 from kubernetes import client, config
 from kubernetes.client.exceptions import ApiException
@@ -63,16 +62,20 @@ def _load() -> None:
         config.load_kube_config()
 
 
-def run(code: str, timeout: int = 1800, keep: bool = False) -> str:
+def run(code: str, timeout: int = 28800, keep: bool = False) -> str:
     """Run `code` on one v5e chip. Blocks until it finishes. Returns stdout.
 
     timeout covers the whole wait: queue time plus node provisioning plus the run.
     A cold chip can take several minutes to arrive, which is normal and is why the
     function prints its state transitions rather than sitting silent.
+
+    The job name is deterministic (one per student). If a previous job with the
+    same name is still running, the create call will fail with 409 Conflict,
+    which prevents a student from hogging multiple chips at once.
     """
     _load()
     ns = _namespace()
-    name = f"tpu-{os.environ.get('JUPYTERHUB_USER', 'anon')}-{uuid.uuid4().hex[:8]}"
+    name = f"tpu-{os.environ.get('JUPYTERHUB_USER', 'anon')}"
     name = name.replace("_", "-").lower()[:63]
 
     batch = client.BatchV1Api()

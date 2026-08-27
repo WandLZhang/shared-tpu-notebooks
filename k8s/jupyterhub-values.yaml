@@ -186,11 +186,11 @@ prePuller:
 
 cull:
   enabled: true
-  # A student who closes the laptop should not hold a pod all night. One hour idle,
-  # checked every five minutes. maxAge 12h catches the tab left open over a weekend.
-  timeout: 3600
+  # 8-hour hard limits. timeout catches an idle session; maxAge catches one
+  # that stays active (e.g. a training loop left running overnight).
+  timeout: 28800
   every: 300
-  maxAge: 43200
+  maxAge: 28800
 
 singleuser:
   # z2jh ships a `block-cloud-metadata` initContainer that runs privileged with
