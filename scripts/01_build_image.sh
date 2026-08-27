@@ -15,10 +15,37 @@ IMAGE="${REPO}/scipy-notebook:latest"
 echo "==> checking if Artifact Registry repository exists"
 if ! gcloud artifacts repositories describe course-images --location="${REGION}" --project="${PROJECT}" >/dev/null 2>&1; then
   echo "    creating repository course-images in ${REGION}"
+
+  # Cleanup policy: automatically delete untagged images older than 30 days.
+  # Without this, stale image layers accumulate indefinitely and bill for storage.
+  CLEANUP_POLICY=$(mktemp)
+  trap 'rm -f "${CLEANUP_POLICY}"' EXIT
+  cat > "${CLEANUP_POLICY}" <<'POLICY'
+[
+  {
+    "name": "delete-untagged",
+    "action": {"type": "Delete"},
+    "condition": {
+      "tagState": "untagged",
+      "olderThan": "30d"
+    }
+  },
+  {
+    "name": "keep-recent-tagged",
+    "action": {"type": "Keep"},
+    "mostRecentVersions": {
+      "keepCount": 5
+    }
+  }
+]
+POLICY
+
   gcloud artifacts repositories create course-images \
     --repository-format=docker \
     --location="${REGION}" \
     --description="Docker repository for course images" \
+    --cleanup-policy-dry-run=false \
+    --cleanup-policies="${CLEANUP_POLICY}" \
     --project="${PROJECT}"
 fi
 
