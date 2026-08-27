@@ -79,11 +79,16 @@ trap 'rm -f "${VALUES}"' EXIT
 sed "s|__APISERVER_ENDPOINT__|${APISERVER}|" \
   "$(dirname "$0")/../k8s/jupyterhub-values.yaml" > "${VALUES}"
 
+IMAGE_NAME="${REGION}-docker.pkg.dev/${PROJECT}/course-images/scipy-notebook"
+IMAGE_TAG="latest"
+
 echo "==> installing JupyterHub ${CHART_VERSION} into ${NAMESPACE}"
 helm upgrade --install "${RELEASE}" jupyterhub/jupyterhub \
   --namespace "${NAMESPACE}" \
   --version "${CHART_VERSION}" \
   --values "${VALUES}" \
+  --set singleuser.image.name="${IMAGE_NAME}" \
+  --set singleuser.image.tag="${IMAGE_TAG}" \
   --set-file "singleuser.extraFiles.submit_tpu\.py.stringData=$(dirname "$0")/../notebooks/submit_tpu.py" \
   --set-file "singleuser.extraFiles.hw0_tpu_hello\.ipynb.stringData=$(dirname "$0")/../notebooks/hw0_tpu_hello.ipynb" \
   --timeout 20m \

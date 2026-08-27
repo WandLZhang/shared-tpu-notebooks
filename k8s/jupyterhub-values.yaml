@@ -292,25 +292,6 @@ singleuser:
     hw0_tpu_hello.ipynb:
       mountPath: /opt/course/hw0_tpu_hello.ipynb
       stringData: "placeholder, replaced at deploy time"
-
-    # ONLY NEEDED WHEN REACHING THE HUB THROUGH kubectl port-forward.
-    #
-    # Jupyter Server compares the browser's Origin header against its own Host. A
-    # port-forward breaks that comparison: the browser sends the real hostname while
-    # the server believes it is localhost:8899. Every API call and websocket is
-    # refused, so the kernel never connects and a cell sits on [*] forever with no
-    # error anywhere the student can see.
-    #
-    # Behind an Ingress (with IAP) the Origin and Host match and the default check does
-    # its job. This is commented out to preserve CSRF protection for production.
-    # Uncomment only if you are debugging via `kubectl port-forward`:
-    #
-    # jupyter_server_config.py:
-    #   mountPath: /usr/local/etc/jupyter/jupyter_server_config.py
-    #   stringData: |
-    #     c.ServerApp.allow_origin = "*"
-    #     c.ServerApp.allow_remote_access = True
-    #     c.ServerApp.disable_check_xsrf = True
   # Two jobs at spawn.
   #
   # 1. Install the kubernetes client. The scipy-notebook image has none and
@@ -329,8 +310,7 @@ singleuser:
         command:
           - "sh"
           - "-c"
-          - "pip install --quiet kubernetes >/dev/null 2>&1 || true;
-             cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
+          - "cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
   defaultUrl: "/lab"
   image:
     name: quay.io/jupyter/scipy-notebook
