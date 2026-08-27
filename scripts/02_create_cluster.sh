@@ -35,6 +35,21 @@ fi
 gcloud container clusters get-credentials "${CLUSTER}" \
   --region="${REGION}" --project="${PROJECT}"
 
+# Guard against runaway log ingestion costs ($0.50/GiB). A student writing
+# `while True: print("hello")` can silently ingest terabytes of logs overnight.
+# This exclusion filter drops container stdout/stderr from student namespaces
+# before it reaches Cloud Logging billing. Logs from kube-system, the hub pod,
+# and other infrastructure namespaces are preserved.
+echo "==> log exclusion filter for student namespaces"
+if ! gcloud logging sinks describe "_Default" --project="${PROJECT}" >/dev/null 2>&1; then
+  echo "    warning: could not verify default sink; skipping log exclusion"
+else
+  gcloud logging sinks update "_Default" \
+    --project="${PROJECT}" \
+    --add-exclusion="name=student-notebook-noise,filter=resource.labels.namespace_name=~\"^class-sec-\"" \
+    2>/dev/null || echo "    exclusion already exists or could not be created"
+fi
+
 echo "==> Kueue ${KUEUE_VERSION}"
 kubectl apply --server-side -f \
   "https://github.com/kubernetes-sigs/kueue/releases/download/${KUEUE_VERSION}/manifests.yaml"
@@ -111,6 +126,9 @@ spec:
     count/jobs.batch: "250"
     count/pods: "500"
     count/persistentvolumeclaims: "300"
+    # Cap total provisioned storage per section. Without this, a single rogue
+    # PVC request could create a TB-scale persistent disk bill.
+    requests.storage: "500Gi"
 ---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue

@@ -332,6 +332,10 @@ singleuser:
         cpu_guarantee: 2
         mem_limit: 8G
         mem_guarantee: 8G
+        # Spot VMs cut notebook cost by 60-91%. Student state lives on the PVC,
+        # so a preemption is just a page reload — no work lost.
+        node_selector:
+          cloud.google.com/gke-spot: "true"
 
     - display_name: "Large CPU notebook"
       description: >-
@@ -342,6 +346,8 @@ singleuser:
         cpu_guarantee: 8
         mem_limit: 32G
         mem_guarantee: 32G
+        node_selector:
+          cloud.google.com/gke-spot: "true"
 
     - display_name: "Pinned TPU v5e notebook (staff only)"
       description: >-
