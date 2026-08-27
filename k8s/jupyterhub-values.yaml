@@ -89,25 +89,21 @@ hub:
               jwt_assertion = self.request.headers.get(IAP_JWT_HEADER, "")
               email = ""
 
-              if jwt_assertion:
-                  try:
-                      claims = decode_iap_jwt_claims(jwt_assertion)
-                      email = claims["email"].strip().lower()
-                  except Exception as e:
-                      self.log.warning(f"IAP JWT validation failed: {e}")
-                      raise web.HTTPError(
-                          401,
-                          f"Invalid IAP JWT assertion: {e}",
-                      )
-              else:
-                  # Fallback to email header if JWT assertion header is not passed
-                  raw_email = self.request.headers.get(IAP_EMAIL_HEADER, "")
-                  if not raw_email:
-                      raise web.HTTPError(
-                          401,
-                          "No IAP authentication headers. You reached the hub without going through IAP.",
-                      )
-                  email = raw_email.split(":", 1)[-1].strip().lower()
+              if not jwt_assertion:
+                  raise web.HTTPError(
+                      401,
+                      "No IAP JWT assertion header found. You reached the hub without going through IAP.",
+                  )
+
+              try:
+                  claims = decode_iap_jwt_claims(jwt_assertion)
+                  email = claims["email"].strip().lower()
+              except Exception as e:
+                  self.log.warning(f"IAP JWT validation failed: {e}")
+                  raise web.HTTPError(
+                      401,
+                      f"Invalid IAP JWT assertion: {e}",
+                  )
 
               # Keep the local part so pod names stay readable. Safe while every user
               # comes from one domain; add the domain back if that stops being true.

@@ -46,7 +46,7 @@ if ! gcloud logging sinks describe "_Default" --project="${PROJECT}" >/dev/null 
 else
   gcloud logging sinks update "_Default" \
     --project="${PROJECT}" \
-    --add-exclusion="name=student-notebook-noise,filter=resource.labels.namespace_name=~\"^class-sec-\"" \
+    --add-exclusion="name=student-notebook-noise,filter=resource.labels.namespace_name=~\"^class-sec-\" AND resource.labels.pod_name=~\"^jupyter-\"" \
     2>/dev/null || echo "    exclusion already exists or could not be created"
 fi
 
