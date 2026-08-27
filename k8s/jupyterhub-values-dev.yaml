@@ -1,0 +1,26 @@
+# Development overlay for JupyterHub.
+#
+# Apply this file on top of the base values IF AND ONLY IF you are reaching the hub
+# via `kubectl port-forward` instead of the proper IAP Ingress.
+#
+#   helm upgrade ... -f k8s/jupyterhub-values.yaml -f k8s/jupyterhub-values-dev.yaml
+#
+# WHY THIS EXISTS
+#
+# Jupyter Server compares the browser's Origin header against its own Host. A
+# port-forward breaks that comparison: the browser sends the real hostname while
+# the server believes it is localhost:8899. Every API call and websocket is refused,
+# so the kernel never connects and a cell sits on [*] forever with no error anywhere
+# the student can see.
+#
+# This file disables CSRF and Origin checks so port-forwarding works.
+# DO NOT apply this file in production, as it turns off a real cross-site protection.
+
+singleuser:
+  extraFiles:
+    jupyter_server_config.py:
+      mountPath: /usr/local/etc/jupyter/jupyter_server_config.py
+      stringData: |
+        c.ServerApp.allow_origin = "*"
+        c.ServerApp.allow_remote_access = True
+        c.ServerApp.disable_check_xsrf = True
