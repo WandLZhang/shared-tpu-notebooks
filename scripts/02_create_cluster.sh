@@ -101,6 +101,17 @@ kind: Namespace
 metadata:
   name: class-sec-${S}
 ---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: section-quota
+  namespace: class-sec-${S}
+spec:
+  hard:
+    count/jobs.batch: "250"
+    count/pods: "500"
+    count/persistentvolumeclaims: "300"
+---
 apiVersion: kueue.x-k8s.io/v1beta2
 kind: LocalQueue
 metadata:

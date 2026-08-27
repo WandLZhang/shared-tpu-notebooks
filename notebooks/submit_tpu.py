@@ -117,6 +117,13 @@ def run(code: str, timeout: int = 1800, keep: bool = False) -> str:
                                 limits={"google.com/tpu": "1"},
                                 requests={"google.com/tpu": "1"},
                             ),
+                            security_context=client.V1SecurityContext(
+                                run_as_user=1000,
+                                run_as_group=1000,
+                                run_as_non_root=True,
+                                allow_privilege_escalation=False,
+                                capabilities=client.V1Capabilities(drop=["ALL"]),
+                            ),
                         )
                     ],
                 )
