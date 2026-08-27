@@ -50,23 +50,65 @@ hub:
   # is the IAP-protected one.
   extraConfig:
     iap-auth: |
+      import base64
+      import json
+      import time
       from jupyterhub.auth import Authenticator
       from jupyterhub.handlers.login import LoginHandler
       from jupyterhub.utils import url_path_join
       from tornado import web
 
-      IAP_HEADER = "X-Goog-Authenticated-User-Email"
+      IAP_JWT_HEADER = "X-Goog-IAP-JWT-Assertion"
+      IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
+
+      def decode_iap_jwt_claims(jwt_str: str) -> dict:
+          """Decode and validate claims from the IAP signed JWT."""
+          parts = jwt_str.strip().split(".")
+          if len(parts) != 3:
+              raise ValueError("Malformed IAP JWT assertion token")
+          
+          payload_b64 = parts[1]
+          payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
+          payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
+          claims = json.loads(payload_json)
+
+          if claims.get("iss") != "https://cloud.google.com/iap":
+              raise ValueError(f"Invalid IAP JWT issuer: {claims.get('iss')}")
+
+          now = time.time()
+          if "exp" in claims and claims["exp"] < (now - 30):
+              raise ValueError("IAP JWT assertion has expired")
+
+          if "email" not in claims:
+              raise ValueError("IAP JWT assertion missing verified email claim")
+
+          return claims
 
       class IAPLoginHandler(LoginHandler):
           async def get(self):
-              raw = self.request.headers.get(IAP_HEADER, "")
-              if not raw:
-                  raise web.HTTPError(
-                      401,
-                      "No IAP header. You reached the hub without going through IAP.",
-                  )
-              # "accounts.google.com:someone@example.com" -> "someone@example.com"
-              email = raw.split(":", 1)[-1].strip().lower()
+              jwt_assertion = self.request.headers.get(IAP_JWT_HEADER, "")
+              email = ""
+
+              if jwt_assertion:
+                  try:
+                      claims = decode_iap_jwt_claims(jwt_assertion)
+                      email = claims["email"].strip().lower()
+                  except Exception as e:
+                      self.log.warning(f"IAP JWT validation failed: {e}")
+                      raise web.HTTPError(
+                          401,
+                          f"Invalid IAP JWT assertion: {e}",
+                      )
+              else:
+                  # Fallback to email header if JWT assertion header is not passed
+                  raw_email = self.request.headers.get(IAP_EMAIL_HEADER, "")
+                  if not raw_email:
+                      raise web.HTTPError(
+                          401,
+                          "No IAP authentication headers. You reached the hub without going through IAP.",
+                      )
+                  email = raw_email.split(":", 1)[-1].strip().lower()
+
               # Keep the local part so pod names stay readable. Safe while every user
               # comes from one domain; add the domain back if that stops being true.
               username = email.split("@")[0]
@@ -254,21 +296,18 @@ singleuser:
     # port-forward breaks that comparison: the browser sends the real hostname while
     # the server believes it is localhost:8899. Every API call and websocket is
     # refused, so the kernel never connects and a cell sits on [*] forever with no
-    # error anywhere the student can see. The only trace is in the notebook pod log:
+    # error anywhere the student can see.
     #
-    #   Blocking Cross Origin API request for /user/NAME/api/events/subscribe.
-    #   Origin: https://..., Host: localhost:8899
-    #   403 GET /user/NAME/api/events/subscribe
+    # Behind an Ingress (with IAP) the Origin and Host match and the default check does
+    # its job. This is commented out to preserve CSRF protection for production.
+    # Uncomment only if you are debugging via `kubectl port-forward`:
     #
-    # Delete this file once the hub is behind a proper Ingress. With IAP the Origin
-    # and Host match and the default check does its job. Leaving it in place on a
-    # public deployment turns off a real cross-site protection.
-    jupyter_server_config.py:
-      mountPath: /usr/local/etc/jupyter/jupyter_server_config.py
-      stringData: |
-        c.ServerApp.allow_origin = "*"
-        c.ServerApp.allow_remote_access = True
-        c.ServerApp.disable_check_xsrf = True
+    # jupyter_server_config.py:
+    #   mountPath: /usr/local/etc/jupyter/jupyter_server_config.py
+    #   stringData: |
+    #     c.ServerApp.allow_origin = "*"
+    #     c.ServerApp.allow_remote_access = True
+    #     c.ServerApp.disable_check_xsrf = True
   # Two jobs at spawn.
   #
   # 1. Install the kubernetes client. The scipy-notebook image has none and
