@@ -45,6 +45,7 @@ case "${ACTION}" in
     DAY=$(awk -v n="${N}" -v c="${CHIP_HR}" 'BEGIN{printf "%.0f", n*c*24}')
     echo "warm pool -> ${N} chips"
     echo "cost      -> \$${COST}/hr, \$${DAY}/day if left running"
+    echo "guardrail -> Auto-off scheduled daily at 22:00 UTC (CronJob: tpu-warm-pool-auto-off)"
     echo
     echo "Nodes take 2-4 min to arrive. Watch them:"
     echo "  kubectl --context=${CTX} get nodes -l cloud.google.com/gke-tpu-accelerator=tpu-v5-lite-podslice -w"
@@ -76,7 +77,7 @@ case "${ACTION}" in
     echo "placeholders requested : ${WANT}"
     echo "placeholders ready     : ${HAVE}"
     echo "TPU nodes up           : ${NODES}   (includes any student job running now)"
-    echo "warm burn              : \$${COST}/hr"
+    echo "warm burn              : \$${COST}/hr (Auto-off daily at 22:00 UTC)"
     ;;
 
   *)

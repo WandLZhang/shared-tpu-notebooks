@@ -81,3 +81,57 @@ spec:
               google.com/tpu: "1"
             requests:
               google.com/tpu: "1"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: warm-pool-auto-off
+  namespace: __NAMESPACE__
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: warm-pool-auto-off
+  namespace: __NAMESPACE__
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/scale"]
+    resourceNames: ["tpu-warm-pool"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: warm-pool-auto-off
+  namespace: __NAMESPACE__
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: warm-pool-auto-off
+subjects:
+  - kind: ServiceAccount
+    name: warm-pool-auto-off
+    namespace: __NAMESPACE__
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: tpu-warm-pool-auto-off
+  namespace: __NAMESPACE__
+spec:
+  # Run at 22:00 (10 PM) UTC every day
+  schedule: "0 22 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: warm-pool-auto-off
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: bitnami/kubectl:latest
+              command:
+                - kubectl
+                - scale
+                - deployment/tpu-warm-pool
+                - --replicas=0

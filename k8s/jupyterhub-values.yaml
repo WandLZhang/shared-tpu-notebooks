@@ -275,6 +275,9 @@ singleuser:
   # scale test. See k8s/priority-classes.yaml.
   extraPodConfig:
     priorityClassName: student-notebook
+    # GKE Sandbox (gVisor) provides strong container isolation. Cloud TPU pods
+    # cannot use gVisor, so this is disabled on the Pinned TPU profile.
+    runtimeClassName: gvisor
   extraEnv:
     KUEUE_LOCAL_QUEUE: "tpu"
     # submit_tpu.py is mounted here rather than into /home/jovyan, because the home
@@ -371,6 +374,10 @@ singleuser:
         image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
         extra_resource_limits:
           google.com/tpu: "1"
+        extra_pod_config:
+          # Cloud TPUs require direct hardware driver access, which is incompatible
+          # with gVisor. Disable the hub-wide gVisor default for this profile.
+          runtimeClassName: ""
         node_selector:
           cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
           cloud.google.com/gke-tpu-topology: 1x1

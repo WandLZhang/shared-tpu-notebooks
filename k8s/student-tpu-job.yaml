@@ -53,6 +53,14 @@ spec:
       containers:
         - name: hw
           image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: STUDENT
               value: __STUDENT__
