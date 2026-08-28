@@ -11,7 +11,7 @@ set -euo pipefail
 PROJECT="${PROJECT:-${PROJECT:?set PROJECT to your GCP project id}}"
 REGION="${REGION:-us-west4}"
 CLUSTER="${CLUSTER:-tpu-notebooks}"
-NAMESPACE="${NAMESPACE:-class-sec-a}"
+NAMESPACE="${NAMESPACE:-cmu-idl}"
 RELEASE="${RELEASE:-hub}"
 CHART_VERSION="${CHART_VERSION:-4.2.0}"
 

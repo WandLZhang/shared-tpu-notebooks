@@ -1,0 +1,40 @@
+# Core JAX and AI Stack
+jax[tpu]
+jax-ai-stack==2025.10.28
+
+# PyTorch
+torch
+torchaudio
+
+# Data Science & ML Utilities
+augmax
+
+# NumPy: arrays and general numerical computing.
+numpy==2.3.4
+
+# SciPy: scientific computing utilities used by parts of the
+# JAX ecosystem and course projects.
+scipy==1.16.3
+
+# Pandas: tabular data processing and dataset manipulation.
+pandas==3.0.5
+
+# Scikit-learn: classical ML utilities and preprocessing.
+scikit-learn==1.9.0
+
+# Matplotlib: plotting and visualization for assignments,
+# experiments, and reports.
+matplotlib==3.11.1
+
+# Infrastructure / Scripting
+kubernetes
+
+# ------------------------------------------------------------
+# General utilities
+# ------------------------------------------------------------
+
+# Progress bars for training loops and data processing.
+tqdm==4.70.0
+
+# YAML configuration-file support.
+PyYAML==6.0.3

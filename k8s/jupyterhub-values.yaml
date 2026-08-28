@@ -261,7 +261,7 @@ singleuser:
     type: dynamic
     capacity: 10Gi
     dynamic:
-      storageClass: standard-rwo
+      storageClass: standard-rwo-retain
   # Service account the notebook uses to submit TPU Jobs. Bound by RBAC in
   # 03_deploy_hub.sh to create Jobs in its own namespace and nothing else.
   serviceAccountName: student
@@ -309,8 +309,8 @@ singleuser:
           - "cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
   defaultUrl: "/lab"
   image:
-    name: quay.io/jupyter/scipy-notebook
-    tag: "2024-11-11"
+    name: us-docker.pkg.dev/__PROJECT__/cmu-idl/jupyter-course-image
+    tag: "latest"
 
   profileList:
     - display_name: "Course default — CPU notebook"
