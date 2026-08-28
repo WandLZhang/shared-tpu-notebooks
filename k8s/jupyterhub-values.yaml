@@ -50,9 +50,10 @@ hub:
   # is the IAP-protected one.
   extraConfig:
     iap-auth: |
-      import base64
-      import json
       import time
+      import jwt
+      import json
+      import urllib.request
       from jupyterhub.auth import Authenticator
       from jupyterhub.handlers.login import LoginHandler
       from jupyterhub.utils import url_path_join
@@ -60,28 +61,58 @@ hub:
 
       IAP_JWT_HEADER = "X-Goog-IAP-JWT-Assertion"
       IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
+      IAP_PUBLIC_KEYS_URL = "https://www.gstatic.com/iap/verify/public_key"
+
+      # Simple cache for public keys
+      KEY_CACHE = {"keys": {}, "expires_at": 0}
+
+      def get_iap_public_keys():
+          now = time.time()
+          if KEY_CACHE["keys"] and now < KEY_CACHE["expires_at"]:
+              return KEY_CACHE["keys"]
+              
+          req = urllib.request.Request(IAP_PUBLIC_KEYS_URL)
+          with urllib.request.urlopen(req) as response:
+              cache_control = response.headers.get("Cache-Control", "")
+              max_age = 3600
+              for part in cache_control.split(","):
+                  if part.strip().startswith("max-age="):
+                      try:
+                          max_age = int(part.split("=")[1])
+                      except ValueError:
+                          pass
+              
+              keys = json.loads(response.read())
+              KEY_CACHE["keys"] = keys
+              KEY_CACHE["expires_at"] = now + max_age
+              return keys
 
       def decode_iap_jwt_claims(jwt_str: str) -> dict:
-          """Decode and validate claims from the IAP signed JWT."""
-          parts = jwt_str.strip().split(".")
-          if len(parts) != 3:
-              raise ValueError("Malformed IAP JWT assertion token")
+          """Decode and validate claims from the IAP signed JWT cryptographically."""
+          header = jwt.get_unverified_header(jwt_str)
+          key_id = header.get("kid")
+          if not key_id:
+              raise ValueError("No 'kid' found in JWT header")
+              
+          keys = get_iap_public_keys()
+          pub_key = keys.get(key_id)
+          if not pub_key:
+              raise ValueError(f"Public key for kid {key_id} not found")
           
-          payload_b64 = parts[1]
-          payload_b64 += "=" * ((4 - len(payload_b64) % 4) % 4)
-          payload_json = base64.urlsafe_b64decode(payload_b64.encode("utf-8")).decode("utf-8")
-          claims = json.loads(payload_json)
-
-          if claims.get("iss") != "https://cloud.google.com/iap":
-              raise ValueError(f"Invalid IAP JWT issuer: {claims.get('iss')}")
-
-          now = time.time()
-          if "exp" in claims and claims["exp"] < (now - 30):
-              raise ValueError("IAP JWT assertion has expired")
-
+          # Verify the signature, issuer, and expiration
+          # (For production, you should also provide the 'audience' parameter 
+          # which is the backend service ID).
+          claims = jwt.decode(
+              jwt_str,
+              key=pub_key,
+              algorithms=["ES256"],
+              options={"verify_aud": False},
+              issuer="https://cloud.google.com/iap"
+          )
+          
           if "email" not in claims:
               raise ValueError("IAP JWT assertion missing verified email claim")
-
+              
           return claims
 
       class IAPLoginHandler(LoginHandler):
