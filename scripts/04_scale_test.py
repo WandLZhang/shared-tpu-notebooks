@@ -55,25 +55,23 @@ def parse_ts(s: str | None) -> float | None:
     ).timestamp()
 
 
-def submit(students: int, sections: list[str]) -> list[dict]:
+def submit(students: int, namespace: str) -> list[dict]:
     """Create every student Job up front. The stampede is the point of the test."""
     template = JOB_TEMPLATE.read_text()
     roster = []
     batch = []
 
     for i in range(students):
-        sec = sections[i % len(sections)]
         name = f"student-{i:03d}"
-        ns = f"class-sec-{sec}"
         manifest = (
             template.replace("__STUDENT__", name)
-            .replace("__NAMESPACE__", ns)
+            .replace("__NAMESPACE__", namespace)
             .replace("__QUEUE__", "tpu")
         )
         # Strip the leading comment block so the concatenated doc stays valid.
         manifest = manifest[manifest.index("apiVersion:") :]
         batch.append(manifest)
-        roster.append({"student": name, "namespace": ns, "section": sec})
+        roster.append({"student": name, "namespace": namespace})
 
         # Apply in chunks; a single 300-doc apply is slow and hard to read when it
         # partially fails.
@@ -105,7 +103,7 @@ def collect(roster: list[dict], timeout: int) -> list[dict]:
 
         job_state = {}
         for j in jobs["items"]:
-            n = j["metadata"]["labels"].get("tpu-notebooks/student")
+            n = j["metadata"]["labels"].get("tpu-class/student")
             if n:
                 st = j.get("status", {})
                 job_state[n] = {
@@ -159,19 +157,18 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--students", type=int, default=100)
     ap.add_argument("--chips", type=int, default=32)
-    ap.add_argument("--sections", default="a b c d")
+    ap.add_argument("--namespace", default="cmu-idl")
     ap.add_argument("--timeout", type=int, default=7200)
     args = ap.parse_args()
 
-    sections = args.sections.split()
     RESULTS.mkdir(exist_ok=True)
     stamp = time.strftime("%m%d-%H%M%S")
     path = RESULTS / f"run-{stamp}.jsonl"
 
-    print(f"==> {args.students} students, {args.chips} chips, sections {sections}")
+    print(f"==> {args.students} students, {args.chips} chips, namespace {args.namespace}")
     print(f"    results -> {path}")
 
-    roster = submit(args.students, sections)
+    roster = submit(args.students, args.namespace)
     print("==> all submitted; polling")
     rows = collect(roster, args.timeout)
 

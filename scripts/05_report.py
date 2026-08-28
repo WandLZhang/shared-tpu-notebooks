@@ -114,10 +114,7 @@ def main() -> int:
     print(f"| cost per student | ${cost / max(total, 1):.3f} |")
     print()
 
-    by_sec: dict[str, int] = {}
-    for r in ok:
-        by_sec[r.get("section", "?")] = by_sec.get(r.get("section", "?"), 0) + 1
-    print("completions by section: " + ", ".join(f"{k}={v}" for k, v in sorted(by_sec.items())))
+
 
     if incomplete:
         print()

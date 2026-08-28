@@ -73,7 +73,7 @@ venv:
 	python3 -m venv .venv && ./.venv/bin/pip install --quiet --upgrade pip
 
 scale: check venv
-	./.venv/bin/python scripts/04_scale_test.py --students 100 --chips 32
+	./.venv/bin/python scripts/04_scale_test.py --students $(STUDENTS) --chips $(POOL_CHIPS) --namespace $(NS)
 	./.venv/bin/python scripts/05_report.py
 
 report: venv
