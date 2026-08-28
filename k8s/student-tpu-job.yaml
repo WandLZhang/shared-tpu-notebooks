@@ -32,6 +32,9 @@ spec:
   suspend: true
   # backoffLimit 0 deletes the pod the moment it fails and takes the logs with it.
   backoffLimit: 2
+  # Hard 8-hour ceiling. Prevents a stuck or runaway job from holding a chip
+  # (and billing a full node) indefinitely.
+  activeDeadlineSeconds: 28800
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
@@ -53,6 +56,14 @@ spec:
       containers:
         - name: hw
           image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
           env:
             - name: STUDENT
               value: __STUDENT__

@@ -28,6 +28,19 @@ for Z in ${SPRAY_ZONES}; do
 done
 
 echo
+IP_NAME="${IP_NAME:-tpu-notebooks-ip}"
+echo "==> deleting static IP ${IP_NAME}"
+gcloud compute addresses delete "${IP_NAME}" --global --project="${PROJECT}" --quiet 2>/dev/null || echo "    already gone"
+
+echo
+IAP_MEMBER="${IAP_MEMBER:-user:$(gcloud config get-value account 2>/dev/null)}"
+echo "==> removing IAM binding for ${IAP_MEMBER}"
+gcloud projects remove-iam-policy-binding "${PROJECT}" \
+  --member="${IAP_MEMBER}" \
+  --role="roles/iap.httpsResourceAccessor" \
+  --condition=None --quiet >/dev/null 2>&1 || echo "    already gone"
+
+echo
 echo "==> verification: anything below this line is still costing money"
 echo
 echo "--- clusters ---"

@@ -287,7 +287,7 @@ The pinned profile attaches a chip for the life of the notebook, at $1.35 for ea
 - **Cross-origin.** Delete the `jupyter_server_config.py` entry from
   `k8s/jupyterhub-values.yaml` once you no longer use a port-forward. It relaxes the
   cross-origin check, and behind an Ingress the check works correctly on its own.
-- **Sandbox.** Student code is not trusted. Enable GKE Sandbox (gVisor) on student pods.
+- **Sandbox.** Student code is not trusted. The CPU notebook profiles in `jupyterhub-values.yaml` explicitly request `runtimeClassName: gvisor`. On GKE Autopilot, gVisor is natively available out of the box so no cluster-level configuration is needed. (Note: The staff TPU profile disables this because TPUs require direct hardware access which gVisor does not support).
 - **Namespaces.** This repository uses one namespace for each section. One namespace for
   each student gives better isolation.
 - **A course image** that contains JAX and the Kubernetes client. This image replaces the

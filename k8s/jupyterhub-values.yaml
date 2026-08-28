@@ -50,23 +50,92 @@ hub:
   # is the IAP-protected one.
   extraConfig:
     iap-auth: |
+      import time
+      import jwt
+      import json
+      import urllib.request
       from jupyterhub.auth import Authenticator
       from jupyterhub.handlers.login import LoginHandler
       from jupyterhub.utils import url_path_join
       from tornado import web
 
-      IAP_HEADER = "X-Goog-Authenticated-User-Email"
+      IAP_JWT_HEADER = "X-Goog-IAP-JWT-Assertion"
+      IAP_EMAIL_HEADER = "X-Goog-Authenticated-User-Email"
+      IAP_PUBLIC_KEYS_URL = "https://www.gstatic.com/iap/verify/public_key"
+
+      # Simple cache for public keys
+      KEY_CACHE = {"keys": {}, "expires_at": 0}
+
+      def get_iap_public_keys():
+          now = time.time()
+          if KEY_CACHE["keys"] and now < KEY_CACHE["expires_at"]:
+              return KEY_CACHE["keys"]
+              
+          req = urllib.request.Request(IAP_PUBLIC_KEYS_URL)
+          with urllib.request.urlopen(req) as response:
+              cache_control = response.headers.get("Cache-Control", "")
+              max_age = 3600
+              for part in cache_control.split(","):
+                  if part.strip().startswith("max-age="):
+                      try:
+                          max_age = int(part.split("=")[1])
+                      except ValueError:
+                          pass
+              
+              keys = json.loads(response.read())
+              KEY_CACHE["keys"] = keys
+              KEY_CACHE["expires_at"] = now + max_age
+              return keys
+
+      def decode_iap_jwt_claims(jwt_str: str) -> dict:
+          """Decode and validate claims from the IAP signed JWT cryptographically."""
+          header = jwt.get_unverified_header(jwt_str)
+          key_id = header.get("kid")
+          if not key_id:
+              raise ValueError("No 'kid' found in JWT header")
+              
+          keys = get_iap_public_keys()
+          pub_key = keys.get(key_id)
+          if not pub_key:
+              raise ValueError(f"Public key for kid {key_id} not found")
+          
+          # Verify the signature, issuer, and expiration
+          # (For production, you should also provide the 'audience' parameter 
+          # which is the backend service ID).
+          claims = jwt.decode(
+              jwt_str,
+              key=pub_key,
+              algorithms=["ES256"],
+              options={"verify_aud": False},
+              issuer="https://cloud.google.com/iap"
+          )
+          
+          if "email" not in claims:
+              raise ValueError("IAP JWT assertion missing verified email claim")
+              
+          return claims
 
       class IAPLoginHandler(LoginHandler):
           async def get(self):
-              raw = self.request.headers.get(IAP_HEADER, "")
-              if not raw:
+              jwt_assertion = self.request.headers.get(IAP_JWT_HEADER, "")
+              email = ""
+
+              if not jwt_assertion:
                   raise web.HTTPError(
                       401,
-                      "No IAP header. You reached the hub without going through IAP.",
+                      "No IAP JWT assertion header found. You reached the hub without going through IAP.",
                   )
-              # "accounts.google.com:someone@example.com" -> "someone@example.com"
-              email = raw.split(":", 1)[-1].strip().lower()
+
+              try:
+                  claims = decode_iap_jwt_claims(jwt_assertion)
+                  email = claims["email"].strip().lower()
+              except Exception as e:
+                  self.log.warning(f"IAP JWT validation failed: {e}")
+                  raise web.HTTPError(
+                      401,
+                      f"Invalid IAP JWT assertion: {e}",
+                  )
+
               # Keep the local part so pod names stay readable. Safe while every user
               # comes from one domain; add the domain back if that stops being true.
               username = email.split("@")[0]
@@ -148,7 +217,7 @@ cull:
   # checked every five minutes. maxAge 12h catches the tab left open over a weekend.
   timeout: 3600
   every: 300
-  maxAge: 43200
+  maxAge: 28800
 
 singleuser:
   # z2jh ships a `block-cloud-metadata` initContainer that runs privileged with
@@ -223,7 +292,7 @@ singleuser:
     type: dynamic
     capacity: 10Gi
     dynamic:
-      storageClass: standard-rwo
+      storageClass: standard-rwo-retain
   # Service account the notebook uses to submit TPU Jobs. Bound by RBAC in
   # 03_deploy_hub.sh to create Jobs in its own namespace and nothing else.
   serviceAccountName: student
@@ -233,6 +302,9 @@ singleuser:
   # scale test. See k8s/priority-classes.yaml.
   extraPodConfig:
     priorityClassName: student-notebook
+    # GKE Sandbox (gVisor) provides strong container isolation. Cloud TPU pods
+    # cannot use gVisor, so this is disabled on the Pinned TPU profile.
+    runtimeClassName: gvisor
   extraEnv:
     KUEUE_LOCAL_QUEUE: "tpu"
     # submit_tpu.py is mounted here rather than into /home/jovyan, because the home
@@ -247,28 +319,6 @@ singleuser:
     hw0_tpu_hello.ipynb:
       mountPath: /opt/course/hw0_tpu_hello.ipynb
       stringData: "placeholder, replaced at deploy time"
-
-    # ONLY NEEDED WHEN REACHING THE HUB THROUGH kubectl port-forward.
-    #
-    # Jupyter Server compares the browser's Origin header against its own Host. A
-    # port-forward breaks that comparison: the browser sends the real hostname while
-    # the server believes it is localhost:8899. Every API call and websocket is
-    # refused, so the kernel never connects and a cell sits on [*] forever with no
-    # error anywhere the student can see. The only trace is in the notebook pod log:
-    #
-    #   Blocking Cross Origin API request for /user/NAME/api/events/subscribe.
-    #   Origin: https://..., Host: localhost:8899
-    #   403 GET /user/NAME/api/events/subscribe
-    #
-    # Delete this file once the hub is behind a proper Ingress. With IAP the Origin
-    # and Host match and the default check does its job. Leaving it in place on a
-    # public deployment turns off a real cross-site protection.
-    jupyter_server_config.py:
-      mountPath: /usr/local/etc/jupyter/jupyter_server_config.py
-      stringData: |
-        c.ServerApp.allow_origin = "*"
-        c.ServerApp.allow_remote_access = True
-        c.ServerApp.disable_check_xsrf = True
   # Two jobs at spawn.
   #
   # 1. Install the kubernetes client. The scipy-notebook image has none and
@@ -287,12 +337,11 @@ singleuser:
         command:
           - "sh"
           - "-c"
-          - "pip install --quiet kubernetes >/dev/null 2>&1 || true;
-             cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
+          - "cp -n /opt/course/hw0_tpu_hello.ipynb /home/jovyan/ 2>/dev/null || true"
   defaultUrl: "/lab"
   image:
-    name: quay.io/jupyter/scipy-notebook
-    tag: "2024-11-11"
+    name: us-docker.pkg.dev/__PROJECT__/cmu-idl/jupyter-course-image
+    tag: "latest"
 
   profileList:
     - display_name: "Course default — CPU notebook"
@@ -310,6 +359,10 @@ singleuser:
         cpu_guarantee: 2
         mem_limit: 8G
         mem_guarantee: 8G
+        # Spot VMs cut notebook cost by 60-91%. Student state lives on the PVC,
+        # so a preemption is just a page reload — no work lost.
+        node_selector:
+          cloud.google.com/gke-spot: "true"
 
     - display_name: "Large CPU notebook"
       description: >-
@@ -320,6 +373,8 @@ singleuser:
         cpu_guarantee: 8
         mem_limit: 32G
         mem_guarantee: 32G
+        node_selector:
+          cloud.google.com/gke-spot: "true"
 
     - display_name: "Pinned TPU v5e notebook (staff only)"
       description: >-
@@ -332,6 +387,10 @@ singleuser:
         image: us-docker.pkg.dev/cloud-tpu-images/jax-ai-image/tpu:latest
         extra_resource_limits:
           google.com/tpu: "1"
+        extra_pod_config:
+          # Cloud TPUs require direct hardware driver access, which is incompatible
+          # with gVisor. Disable the hub-wide gVisor default for this profile.
+          runtimeClassName: ""
         node_selector:
           cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
           cloud.google.com/gke-tpu-topology: 1x1

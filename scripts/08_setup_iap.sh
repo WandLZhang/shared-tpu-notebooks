@@ -23,9 +23,10 @@ REGION="${REGION:-us-west4}"
 CLUSTER="${CLUSTER:-tpu-notebooks}"
 NAMESPACE="${NAMESPACE:-class-sec-a}"
 IP_NAME="${IP_NAME:-tpu-notebooks-ip}"
-# Who may sign in. A group is the right answer for a course:
-#   IAP_MEMBER="group:students@your-university.edu"
-IAP_MEMBER="${IAP_MEMBER:-user:$(gcloud config get-value account 2>/dev/null)}"
+# Ensure DOMAIN has a fallback if not set in Makefile
+DOMAIN="${DOMAIN:-}"
+STUDENT_GROUP="${STUDENT_GROUP:-}"
+TEST_ACCOUNTS="${TEST_ACCOUNTS:-}"
 
 CTX="gke_${PROJECT}_${REGION}_${CLUSTER}"
 gcloud container clusters get-credentials "${CLUSTER}" \
@@ -42,22 +43,53 @@ fi
 IP=$(gcloud compute addresses describe "${IP_NAME}" --global --project="${PROJECT}" --format="value(address)")
 
 # nip.io resolves <anything>.<ip>.nip.io to that IP, so the managed certificate can
-# validate without us owning a DNS zone. Swap DOMAIN for a real name in production; the
-# rest of this script is unchanged.
-DOMAIN="${DOMAIN:-${IP}.nip.io}"
-echo "    ${IP}  ->  ${DOMAIN}"
+# validate without us owning a DNS zone.
+if [[ -z "${DOMAIN}" ]]; then
+  DOMAIN="${IP}.nip.io"
+  echo "    No DOMAIN specified in Makefile. Using ${IP}  ->  ${DOMAIN}"
+else
+  echo "    Using custom domain: ${DOMAIN}"
+fi
 
 echo "==> BackendConfig, ManagedCertificate, Ingress"
 sed -e "s|__DOMAIN__|${DOMAIN}|g" -e "s|__NAMESPACE__|${NAMESPACE}|g" \
   "$(dirname "$0")/../k8s/ingress-iap.yaml" | "${K[@]}" apply -f -
 
-echo "==> granting ${IAP_MEMBER} access"
-gcloud projects add-iam-policy-binding "${PROJECT}" \
-  --member="${IAP_MEMBER}" \
-  --role="roles/iap.httpsResourceAccessor" \
-  --condition=None >/dev/null 2>&1 \
-  && echo "    ok" \
-  || echo "    could not bind; grant roles/iap.httpsResourceAccessor by hand"
+echo "==> granting IAP access"
+
+if [[ -n "${STUDENT_GROUP}" ]]; then
+  echo "    granting to ${STUDENT_GROUP}"
+  gcloud projects add-iam-policy-binding "${PROJECT}" \
+    --member="${STUDENT_GROUP}" \
+    --role="roles/iap.httpsResourceAccessor" \
+    --condition=None >/dev/null 2>&1 \
+    && echo "    ok" \
+    || echo "    could not bind group; grant roles/iap.httpsResourceAccessor by hand"
+else
+  echo "    no STUDENT_GROUP specified in Makefile; skipping group bind"
+fi
+
+if [[ -n "${TEST_ACCOUNTS}" ]]; then
+  for acct in ${TEST_ACCOUNTS}; do
+    echo "    granting to ${acct}"
+    gcloud projects add-iam-policy-binding "${PROJECT}" \
+      --member="${acct}" \
+      --role="roles/iap.httpsResourceAccessor" \
+      --condition=None >/dev/null 2>&1 \
+      && echo "    ok" \
+      || echo "    could not bind ${acct}; grant roles/iap.httpsResourceAccessor by hand"
+  done
+fi
+
+if [[ -z "${STUDENT_GROUP}" ]] && [[ -z "${TEST_ACCOUNTS}" ]]; then
+  # Fallback to current user if nothing is configured
+  FALLBACK_USER="user:$(gcloud config get-value account 2>/dev/null)"
+  echo "    no IAP identities configured. granting to ${FALLBACK_USER}"
+  gcloud projects add-iam-policy-binding "${PROJECT}" \
+    --member="${FALLBACK_USER}" \
+    --role="roles/iap.httpsResourceAccessor" \
+    --condition=None >/dev/null 2>&1 || true
+fi
 
 cat <<EOF
 

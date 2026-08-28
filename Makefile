@@ -15,9 +15,17 @@
 PROJECT ?=
 REGION  ?= us-west4
 CLUSTER ?= tpu-notebooks
-NS      ?= class-sec-a
+NS      ?= cmu-idl
 WARM    ?= 1
-export PROJECT REGION CLUSTER
+
+# Course Scale and Configuration
+STUDENTS      ?= 40
+POOL_CHIPS    ?= 32
+DOMAIN        ?= # e.g. jupyter.cs.cmu.edu
+STUDENT_GROUP ?= # e.g. group:idl-11785-students@cmu.edu
+TEST_ACCOUNTS ?= # e.g. user:test1@cmu.edu user:ta1@cmu.edu
+
+export PROJECT REGION CLUSTER STUDENTS POOL_CHIPS DOMAIN STUDENT_GROUP TEST_ACCOUNTS
 
 .PHONY: check preflight cluster hub iap warm-on warm-off demo smoke scale report teardown venv
 
@@ -65,7 +73,7 @@ venv:
 	python3 -m venv .venv && ./.venv/bin/pip install --quiet --upgrade pip
 
 scale: check venv
-	./.venv/bin/python scripts/04_scale_test.py --students 100 --chips 32
+	./.venv/bin/python scripts/04_scale_test.py --students $(STUDENTS) --chips $(POOL_CHIPS) --namespace $(NS)
 	./.venv/bin/python scripts/05_report.py
 
 report: venv
